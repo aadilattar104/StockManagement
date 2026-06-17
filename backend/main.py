@@ -7,10 +7,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database import supabase
-from routers import stock, sales_orders, invoices
+from routers import stock, sales_orders, invoices, zypee, sku_norm
 from services.pdf_extractor import extract_so_pdf, extract_invoice_pdf
 from services.stock_loader import load_stock_from_xlsx
-from services.matcher import find_best_stock_match
+from services.matcher import find_best_stock_match, find_best_so_line_match
 
 app = FastAPI(title="Warehouse Fulfilment System")
 
@@ -25,6 +25,8 @@ app.add_middleware(
 app.include_router(stock.router)
 app.include_router(sales_orders.router)
 app.include_router(invoices.router)
+app.include_router(zypee.router)
+app.include_router(sku_norm.router)
 
 
 # ─── Dashboard ────────────────────────────────────────────────────────────────
@@ -42,11 +44,11 @@ async def dashboard():
 
     low_stock = supabase.table("warehouse_stock").select("id", count="exact").lte(
         "stock_qty", 30
-    ).gt("stock_qty", 0).execute()
+    ).gt("stock_qty", 0).eq("is_active", True).execute()
 
     out_stock = supabase.table("warehouse_stock").select("id", count="exact").eq(
         "stock_qty", 0
-    ).execute()
+    ).eq("is_active", True).execute()
 
     invoices_count = supabase.table("invoices").select("id", count="exact").execute()
 
@@ -93,7 +95,7 @@ async def dashboard():
 
     low_stock_detail = supabase.table("warehouse_stock").select("*").lte(
         "stock_qty", 30
-    ).order("stock_qty").limit(5).execute()
+    ).eq("is_active", True).order("stock_qty").limit(5).execute()
     for row in (low_stock_detail.data or []):
         from routers.stock import stock_status
         row["status"] = stock_status(row.get("stock_qty", 0))
@@ -114,6 +116,7 @@ async def fulfilment_matrix():
     Pivot matrix: SKUs as rows, open SOs as columns.
     Each cell = qty_ordered for that SKU in that SO.
     Also returns warehouse stock and falling-short status per SKU.
+    Only includes ACTIVE SKUs (is_active=True).
     """
     # 1. Get all open/partial SOs
     sos_res = supabase.table("sales_orders").select("id,so_number,vendor_name") \
@@ -131,10 +134,10 @@ async def fulfilment_matrix():
         .in_("so_id", so_ids).execute()
     lines = lines_res.data or []
 
-    # 3. Unique matched stock IDs
-    stock_ids = list({l["matched_stock_id"] for l in lines if l.get("matched_stock_id")})
+    # 3. Unique matched stock IDs from SO lines
+    all_matched_stock_ids = list({l["matched_stock_id"] for l in lines if l.get("matched_stock_id")})
 
-    if not stock_ids:
+    if not all_matched_stock_ids:
         return {
             "so_columns": [
                 {"so_id": s["id"], "so_number": s["so_number"], "vendor_name": s["vendor_name"]}
@@ -143,24 +146,33 @@ async def fulfilment_matrix():
             "rows": [],
         }
 
-    # 4. Fetch warehouse stock for those SKUs
+    # 4. Fetch ONLY ACTIVE warehouse stock for those SKUs
+    #    This is the key fix: .eq("is_active", True) ensures inactive SKUs
+    #    (stock_qty=0 and manually marked inactive) never appear in the matrix.
     stock_res = supabase.table("warehouse_stock") \
         .select("id,title,weight,stock_qty") \
-        .in_("id", stock_ids).execute()
+        .in_("id", all_matched_stock_ids) \
+        .eq("is_active", True).execute()
     stock_map = {s["id"]: s for s in (stock_res.data or [])}
 
+    # Only keep lines whose matched stock is active
+    active_stock_ids = set(stock_map.keys())
+
     # 5. Build pivot: sku_id -> { so_id -> total qty_ordered }
+    #    Skip lines where the matched stock is inactive
     pivot = defaultdict(lambda: defaultdict(int))
     for line in lines:
         sid = line.get("matched_stock_id")
-        if sid:
+        if sid and sid in active_stock_ids:
             pivot[sid][line["so_id"]] += line.get("qty_ordered", 0)
 
-    # 6. Build rows
+    # 6. Build rows — only SKUs that have at least one SO with qty > 0
     rows = []
     for sku_id, so_qtys in pivot.items():
-        sku = stock_map.get(sku_id, {})
         total_ordered = sum(so_qtys.values())
+        if total_ordered == 0:
+            continue  # skip SKUs with no active demand
+        sku = stock_map.get(sku_id, {})
         rows.append({
             "sku_id": sku_id,
             "sku_title": sku.get("title", "Unknown SKU"),
@@ -223,7 +235,10 @@ async def load_samples():
             if existing.data:
                 results["sales_order"] = f"SO {so_number} already exists"
             else:
-                stock_result = supabase.table("warehouse_stock").select("id,title,weight").execute()
+                # Only match against active stock
+                stock_result = supabase.table("warehouse_stock").select(
+                    "id,title,weight"
+                ).eq("is_active", True).execute()
                 stock_rows = stock_result.data or []
 
                 so_insert = supabase.table("sales_orders").insert({
@@ -264,7 +279,7 @@ async def load_samples():
                                 "status": "not_sent",
                             }).execute()
 
-                    results["sales_order"] = f"SO {so_number} loaded"
+                results["sales_order"] = f"SO {so_number} loaded"
         else:
             results["sales_order"] = "Could not extract SO number"
     else:
@@ -283,15 +298,19 @@ async def load_samples():
                 results["invoice"] = f"Invoice {inv_number} already exists"
             else:
                 from routers.invoices import _recompute_so_status
-                from services.matcher import match_score
 
-                stock_result = supabase.table("warehouse_stock").select("id,title,weight").execute()
+                # Only match against active stock
+                stock_result = supabase.table("warehouse_stock").select(
+                    "id,title,weight"
+                ).eq("is_active", True).execute()
                 stock_rows = stock_result.data or []
 
                 linked_so_ids = []
                 so_ref = extracted_inv.get("so_reference")
                 if so_ref:
-                    so_r = supabase.table("sales_orders").select("id").eq("so_number", so_ref).execute()
+                    so_r = supabase.table("sales_orders").select("id").eq(
+                        "so_number", so_ref
+                    ).execute()
                     linked_so_ids = [s["id"] for s in (so_r.data or [])]
 
                 inv_insert = supabase.table("invoices").insert({
@@ -330,31 +349,34 @@ async def load_samples():
 
                         if il.data and linked_so_ids:
                             for so_id in linked_so_ids:
-                                so_lines = supabase.table("so_line_items").select(
-                                    "id,qty_ordered,product_name"
+                                so_lines_res = supabase.table("so_line_items").select(
+                                    "id,qty_ordered,product_name,gramage"
                                 ).eq("so_id", so_id).execute()
-                                for sol in (so_lines.data or []):
-                                    s = match_score(li.get("product_name", ""), sol.get("product_name", ""))
-                                    if s >= 40:
-                                        fr_res = supabase.table("fulfilment_records").select("*").eq(
-                                            "so_line_id", sol["id"]
-                                        ).execute()
-                                        if fr_res.data:
-                                            fr = fr_res.data[0]
-                                            qty_d = li.get("qty_dispatched", 0)
-                                            new_d = fr.get("qty_dispatched", 0) + qty_d
-                                            qty_o = fr.get("qty_ordered", 0)
-                                            qty_p = max(0, qty_o - new_d)
-                                            st = "not_sent" if new_d == 0 else (
-                                                "fulfilled" if qty_p == 0 else "partial"
-                                            )
-                                            supabase.table("fulfilment_records").update({
-                                                "invoice_line_id": il.data[0]["id"],
-                                                "qty_dispatched": new_d,
-                                                "qty_pending": qty_p,
-                                                "status": st,
-                                            }).eq("id", fr["id"]).execute()
-                                        break
+                                so_lines = so_lines_res.data or []
+
+                                # FIX: use gramage-aware matcher instead of raw match_score
+                                # This prevents 72g invoice lines updating 80g SO lines
+                                best_sol = find_best_so_line_match(li, so_lines)
+
+                                if best_sol:
+                                    fr_res = supabase.table("fulfilment_records").select("*").eq(
+                                        "so_line_id", best_sol["id"]
+                                    ).execute()
+                                    if fr_res.data:
+                                        fr = fr_res.data[0]
+                                        qty_d = li.get("qty_dispatched", 0)
+                                        new_d = fr.get("qty_dispatched", 0) + qty_d
+                                        qty_o = fr.get("qty_ordered", 0)
+                                        qty_p = max(0, qty_o - new_d)
+                                        st = "not_sent" if new_d == 0 else (
+                                            "fulfilled" if qty_p == 0 else "partial"
+                                        )
+                                        supabase.table("fulfilment_records").update({
+                                            "invoice_line_id": il.data[0]["id"],
+                                            "qty_dispatched": new_d,
+                                            "qty_pending": qty_p,
+                                            "status": st,
+                                        }).eq("id", fr["id"]).execute()
 
                         if stock_id:
                             qty = li.get("qty_dispatched", 0)

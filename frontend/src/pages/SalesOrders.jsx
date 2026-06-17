@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getSalesOrders, uploadSalesOrder, confirmSalesOrder, deleteSalesOrder, cancelSalesOrderUpload } from '../api/client'
+import { getSalesOrders, uploadSalesOrder, uploadSalesOrdersBulk, confirmSalesOrder, deleteSalesOrder, cancelSalesOrderUpload } from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import UploadZone from '../components/UploadZone'
 import Modal from '../components/Modal'
@@ -31,6 +31,16 @@ export default function SalesOrders() {
       setPdfPath(data.pdf_path || '')
       setEditedVendor(data.extracted.vendor_name || '')
       setShowUpload(false)
+    },
+    onError: (e) => setError(e.message)
+  })
+
+  const bulkUploadMut = useMutation({
+    mutationFn: uploadSalesOrdersBulk,
+    onSuccess: () => {
+      qc.invalidateQueries(['sales-orders'])
+      setShowUpload(false)
+      setError(null)
     },
     onError: (e) => setError(e.message)
   })
@@ -73,12 +83,32 @@ export default function SalesOrders() {
 
       {showUpload && (
         <div className="card p-5">
-          <UploadZone
-            accept=".pdf"
-            label="Upload Sales Order PDF"
-            onFile={(f) => uploadMut.mutate(f)}
-            loading={uploadMut.isPending}
-          />
+          <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-700 hover:border-brand-500 rounded-lg p-8 cursor-pointer transition-colors">
+            <Upload className="w-8 h-8 text-slate-500 mb-2" />
+            <p className="text-sm text-slate-400">Click to select one or more SO PDFs</p>
+            <p className="text-xs text-slate-600 mt-1">Single file → preview before saving · Multiple files → saved automatically</p>
+            <input
+              type="file"
+              accept=".pdf"
+              multiple
+              className="hidden"
+              disabled={uploadMut.isPending || bulkUploadMut.isPending}
+              onChange={e => {
+                const files = Array.from(e.target.files || [])
+                if (!files.length) return
+                setError(null)
+                if (files.length === 1) {
+                  uploadMut.mutate(files[0])
+                } else {
+                  bulkUploadMut.mutate(files)
+                }
+                e.target.value = ''
+              }}
+            />
+          </label>
+          {(uploadMut.isPending || bulkUploadMut.isPending) && (
+            <p className="mt-3 text-sm text-slate-400 text-center">Processing…</p>
+          )}
           {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
         </div>
       )}

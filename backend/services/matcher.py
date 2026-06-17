@@ -37,10 +37,6 @@ def extract_grams(text: str) -> Optional[float]:
     return None
 
 
-def Optional_float(x):
-    return x  # placeholder typing trick for the above
-
-
 def jaccard_score(a: str, b: str) -> float:
     tokens_a = set(a.split())
     tokens_b = set(b.split())
@@ -76,7 +72,7 @@ def find_best_stock_match(product_name: str, gramage: str, stock_rows: list) -> 
     for row in stock_rows:
         score = match_score(product_name, row.get("title", ""))
 
-        # gramage filter
+        # gramage filter — strict ±15g when both sides have a gramage
         if product_grams is not None:
             stock_grams = extract_grams(str(row.get("weight", "")))
             if stock_grams is not None:
@@ -92,7 +88,39 @@ def find_best_stock_match(product_name: str, gramage: str, stock_rows: list) -> 
     return None, 0.0
 
 
-def fuzzy_vendor_match(vendor_name: str, so_list: list, threshold: int = 70) -> list:
+def find_best_so_line_match(invoice_line: dict, so_lines: list) -> Optional[dict]:
+    """
+    Match an invoice line to the best SO line using both product name AND gramage.
+    Gramage tolerance is ±15g (same as stock matching) — tight enough to prevent
+    72gms invoice lines from matching 220gms SO lines.
+    Returns the best matching SO line dict, or None if no good match found.
+    """
+    inv_name = invoice_line.get("product_name", "")
+    inv_grams = extract_grams(str(invoice_line.get("gramage", "") or ""))
+
+    best_line = None
+    best_score = 0.0
+
+    for sol in so_lines:
+        # Text score
+        text_score = match_score(inv_name, sol.get("product_name", ""))
+        if text_score < MATCH_THRESHOLD:
+            continue
+
+        # Gramage check — strict ±15g when both sides have gramage
+        if inv_grams is not None:
+            sol_grams = extract_grams(str(sol.get("gramage", "") or ""))
+            if sol_grams is not None and abs(inv_grams - sol_grams) > 15:
+                continue  # gramage mismatch — skip
+
+        if text_score > best_score:
+            best_score = text_score
+            best_line = sol
+
+    return best_line
+
+
+def fuzzy_vendor_match(vendor_name: str, so_list: list, threshold: float = 70.0) -> list:
     """
     Returns list of SO dicts from so_list where vendor fuzzy-matches.
     so_list: list of dicts with vendor_name key.

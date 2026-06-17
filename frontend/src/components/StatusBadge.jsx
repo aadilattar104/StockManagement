@@ -27,6 +27,19 @@ export default function StatusBadge({ status, type = 'so', qty }) {
     )
   }
 
+  if (type === 'sku_active') {
+    return status
+      ? (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium border bg-emerald-900/50 text-emerald-300 border-emerald-800/50">
+          Active
+        </span>
+      ) : (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium border bg-slate-800 text-slate-400 border-slate-700">
+          Inactive
+        </span>
+      )
+  }
+
   if (type === 'fulfilment') {
     const map = {
       fulfilled: 'bg-emerald-900/50 text-emerald-300 border-emerald-800/50',

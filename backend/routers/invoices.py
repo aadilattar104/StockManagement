@@ -4,7 +4,7 @@ import tempfile
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from database import supabase
 from services.pdf_extractor import extract_invoice_pdf
-from services.matcher import find_best_stock_match, fuzzy_vendor_match, match_score
+from services.matcher import find_best_stock_match, fuzzy_vendor_match, match_score, find_best_so_line_match
 
 router = APIRouter(prefix="/api/invoices", tags=["invoices"])
 
@@ -115,18 +115,16 @@ async def upload_invoice(file: UploadFile = File(...)):
             li.get("gramage"),
             stock_rows
         )
-        so_line_match = None
+
+        # Collect all SO lines from linked SOs, then find best gramage-aware match
+        all_so_lines = []
         for so in linked_sos:
             so_lines_result = supabase.table("so_line_items").select("*").eq(
                 "so_id", so["id"]
             ).execute()
-            for sol in (so_lines_result.data or []):
-                s = match_score(li.get("product_name", ""), sol.get("product_name", ""))
-                if s >= 40:
-                    so_line_match = sol
-                    break
-            if so_line_match:
-                break
+            all_so_lines.extend(so_lines_result.data or [])
+
+        so_line_match = find_best_so_line_match(li, all_so_lines)
 
         matched_lines.append({
             **li,

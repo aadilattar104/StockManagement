@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from typing import List
 from database import supabase
 from models import VendorUpdateRequest
 from services.pdf_extractor import extract_so_pdf
@@ -148,6 +149,112 @@ async def cancel_so_upload(payload: dict):
     pdf_path = payload.get("pdf_path", "")
     _delete_from_storage(pdf_path)
     return {"deleted": pdf_path}
+
+
+@router.post("/upload-bulk")
+async def upload_so_bulk(files: List[UploadFile] = File(...)):
+    """
+    Upload multiple SO PDFs at once. Each file is extracted, matched, and saved
+    automatically (no confirm step). Returns per-file results.
+    """
+    stock_result = supabase.table("warehouse_stock").select("id,title,weight").execute()
+    stock_rows = stock_result.data or []
+
+    results = []
+
+    for file in files:
+        filename = file.filename or "unknown.pdf"
+
+        if not filename.lower().endswith(".pdf"):
+            results.append({"file": filename, "status": "error", "reason": "Not a PDF"})
+            continue
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            shutil.copyfileobj(file.file, tmp)
+            tmp_path = tmp.name
+
+        try:
+            extracted = extract_so_pdf(tmp_path)
+            so_number = extracted.get("so_number")
+
+            if not so_number:
+                results.append({"file": filename, "status": "error", "reason": "Could not extract SO number"})
+                continue
+
+            # Skip duplicates
+            existing = supabase.table("sales_orders").select("id").eq("so_number", so_number).execute()
+            if existing.data:
+                results.append({"file": filename, "status": "skipped", "so_number": so_number, "reason": "Already exists"})
+                continue
+
+            # Upload PDF to storage
+            storage_path = f"sales_orders/{so_number}.pdf"
+            _upload_to_storage(tmp_path, storage_path)
+
+        finally:
+            os.unlink(tmp_path)
+
+        # Insert SO
+        so_insert = supabase.table("sales_orders").insert({
+            "so_number": so_number,
+            "so_date": extracted.get("so_date"),
+            "vendor_name": extracted.get("vendor_name"),
+            "total_qty": extracted.get("total_qty", 0),
+            "total_amount": extracted.get("total_amount", 0),
+            "status": "open",
+            "pdf_path": storage_path,
+        }).execute()
+
+        if not so_insert.data:
+            results.append({"file": filename, "status": "error", "so_number": so_number, "reason": "DB insert failed"})
+            continue
+
+        so_id = so_insert.data[0]["id"]
+
+        # Insert line items + fulfilment records
+        for li in extracted.get("line_items", []):
+            stock_id, score = find_best_stock_match(
+                li.get("product_name", ""),
+                li.get("gramage"),
+                stock_rows
+            )
+            il = supabase.table("so_line_items").insert({
+                "so_id": so_id,
+                "line_no": li.get("line_no"),
+                "product_name": li.get("product_name"),
+                "gramage": li.get("gramage"),
+                "qty_ordered": li.get("qty_ordered", 0),
+                "rate": li.get("rate"),
+                "discount_pct": li.get("discount_pct"),
+                "amount": li.get("amount"),
+                "matched_stock_id": stock_id,
+            }).execute()
+
+            if il.data:
+                supabase.table("fulfilment_records").insert({
+                    "so_line_id": il.data[0]["id"],
+                    "invoice_line_id": None,
+                    "qty_ordered": li.get("qty_ordered", 0),
+                    "qty_dispatched": 0,
+                    "qty_pending": li.get("qty_ordered", 0),
+                    "status": "not_sent",
+                }).execute()
+
+        results.append({
+            "file": filename,
+            "status": "success",
+            "so_number": so_number,
+            "so_id": so_id,
+            "line_items": len(extracted.get("line_items", [])),
+        })
+
+    summary = {
+        "total": len(results),
+        "success": sum(1 for r in results if r["status"] == "success"),
+        "skipped": sum(1 for r in results if r["status"] == "skipped"),
+        "errors": sum(1 for r in results if r["status"] == "error"),
+    }
+    return {"summary": summary, "results": results}
 
 
 @router.get("")

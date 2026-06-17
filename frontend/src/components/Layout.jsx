@@ -1,5 +1,5 @@
 import { NavLink, useLocation } from 'react-router-dom'
-import { LayoutDashboard, Package, ClipboardList, FileText, Zap } from 'lucide-react'
+import { LayoutDashboard, Package, ClipboardList, FileText, Zap, Warehouse, Link2 } from 'lucide-react'
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { loadSamples } from '../api/client'
@@ -9,6 +9,8 @@ const nav = [
   { to: '/stock',         icon: Package,         label: 'Warehouse Stock' },
   { to: '/sales-orders',  icon: ClipboardList,   label: 'Sales Orders' },
   { to: '/invoices',      icon: FileText,         label: 'Invoices' },
+  { to: '/zypee',              icon: Warehouse, label: 'Zypee Stock' },
+  { to: '/sku-normalization',  icon: Link2,     label: 'SKU Normalization' },
 ]
 
 export default function Layout({ children }) {

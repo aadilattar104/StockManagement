@@ -450,6 +450,44 @@ async def upload_in_transit(file: UploadFile = File(...)):
                 "reason": "Mapping Required",
             })
 
+    # ── Duplicate PO check ────────────────────────────────────────────────────
+    # Check if this PO (warehouse + po_number + po_date) already exists
+    existing_po = supabase.table("zypee_in_transit").select(
+        "zypee_sku_mapping_id,qty"
+    ).eq("warehouse", warehouse).eq("po_number", po_number).eq("po_date", po_date).execute()
+
+    if existing_po.data:
+        existing_rows = existing_po.data  # list of {zypee_sku_mapping_id, qty}
+        # Build a comparable qty map from existing rows
+        existing_qty_map = {r["zypee_sku_mapping_id"]: r["qty"] for r in existing_rows}
+        # Build qty map from incoming matched rows
+        incoming_qty_map = {r["zypee_sku_mapping_id"]: r["qty"] for r in matched}
+        # Check if quantities are identical
+        if existing_qty_map == incoming_qty_map:
+            return {
+                "warehouse": warehouse,
+                "po_date": po_date,
+                "po_number": po_number,
+                "duplicate": True,
+                "qty_changed": False,
+                "matched": 0,
+                "exceptions": exceptions,
+                "rows": [],
+            }
+        else:
+            # Quantities differ — return conflict info + the new rows for replace
+            return {
+                "warehouse": warehouse,
+                "po_date": po_date,
+                "po_number": po_number,
+                "duplicate": True,
+                "qty_changed": True,
+                "matched": 0,
+                "exceptions": exceptions,
+                "rows": [],
+                "rows_payload": matched,  # frontend passes this to replace-po on confirm
+            }
+
     inserted = []
     for row in matched:
         res = supabase.table("zypee_in_transit").insert(row).execute()
@@ -459,8 +497,48 @@ async def upload_in_transit(file: UploadFile = File(...)):
     return {
         "warehouse": warehouse,
         "po_date": po_date,
+        "po_number": po_number,
         "matched": len(inserted),
         "exceptions": exceptions,
+        "rows": inserted,
+    }
+
+
+@router.post("/in-transit/replace-po")
+async def replace_po(payload: dict):
+    """Force-replace an existing PO after user confirms. Deletes old rows, inserts new ones."""
+    warehouse = (payload.get("warehouse") or "").upper()
+    po_number = payload.get("po_number") or ""
+    po_date = payload.get("po_date") or ""
+    rows_data = payload.get("rows") or []  # list of {zypee_sku_mapping_id, sku_name, qty}
+
+    if not warehouse or not po_number or not po_date or not rows_data:
+        raise HTTPException(400, "warehouse, po_number, po_date, and rows are required")
+
+    # Delete existing rows for this PO
+    supabase.table("zypee_in_transit").delete().eq(
+        "warehouse", warehouse
+    ).eq("po_number", po_number).eq("po_date", po_date).execute()
+
+    # Insert fresh rows
+    inserted = []
+    for row in rows_data:
+        res = supabase.table("zypee_in_transit").insert({
+            "warehouse": warehouse,
+            "po_number": po_number,
+            "po_date": po_date,
+            "zypee_sku_mapping_id": row["zypee_sku_mapping_id"],
+            "sku_name": row["sku_name"],
+            "qty": row["qty"],
+        }).execute()
+        if res.data:
+            inserted.append(res.data[0])
+
+    return {
+        "warehouse": warehouse,
+        "po_date": po_date,
+        "po_number": po_number,
+        "matched": len(inserted),
         "rows": inserted,
     }
 
@@ -476,6 +554,23 @@ async def get_in_transit():
     return rows.data or []
 
 
+@router.delete("/in-transit/po")
+async def delete_po(payload: dict):
+    """Delete all transit rows for a specific PO (warehouse + po_date + po_number)."""
+    warehouse = (payload.get("warehouse") or "").upper()
+    po_date = payload.get("po_date") or ""
+    po_number = payload.get("po_number") or ""
+
+    if not warehouse or not po_date or not po_number:
+        raise HTTPException(400, "warehouse, po_date, and po_number are required")
+
+    supabase.table("zypee_in_transit").delete().eq(
+        "warehouse", warehouse
+    ).eq("po_date", po_date).eq("po_number", po_number).execute()
+
+    return {"success": True}
+
+
 @router.delete("/in-transit/{transit_id}")
 async def delete_in_transit(transit_id: str):
     supabase.table("zypee_in_transit").delete().eq("id", transit_id).execute()
@@ -489,7 +584,7 @@ async def get_compare(date: str = None):
     mappings_res = supabase.table("zypee_sku_mappings").select("id,zypee_sku_name,warehouse_stock_id").execute()
     mappings = mappings_res.data or []
     if not mappings:
-        return {"rows": [], "po_status": {}}
+        return {"rows": [], "po_columns": {}}
 
     ws_ids = list({m["warehouse_stock_id"] for m in mappings if m.get("warehouse_stock_id")})
     ws_res = (
@@ -538,50 +633,74 @@ async def get_compare(date: str = None):
             key = m["zypee_sku_name"].strip().lower()
             wh_stock_map.setdefault(mid, {})[wh] = name_to_qty.get(key, 0)
 
-    # Build in-transit map — store full detail (id, qty, po_date, po_number) per mapping per warehouse
-    transit_res = supabase.table("zypee_in_transit").select("id,zypee_sku_mapping_id,warehouse,qty,po_date,po_number").execute()
-    transit_map: dict = {}
-    warehouses_with_po: set = set()
-    for t in transit_res.data or []:
+    # ── Dynamic PO columns ──────────────────────────────────────────────────────
+    # Fetch all in-transit rows
+    transit_res = supabase.table("zypee_in_transit").select(
+        "id,zypee_sku_mapping_id,warehouse,qty,po_date,po_number"
+    ).execute()
+    transit_rows = transit_res.data or []
+
+    # Build po_columns: { "MUM": [...], "PUN": [...], ... }
+    # Each entry: { column_key, warehouse, po_date, po_number }
+    po_columns: dict = {wh: [] for wh in ["MUM", "PUN", "DEL", "BLR"]}
+    seen_column_keys: set = set()
+
+    for t in transit_rows:
+        wh = t["warehouse"]
+        po_date_raw = t["po_date"] or ""
+        po_date_key = po_date_raw.replace("-", "_")           # "2026-06-12" → "2026_06_12"
+        col_key = f"{wh.lower()}_{po_date_key}"              # "mum_2026_06_12"
+        if col_key not in seen_column_keys and wh in po_columns:
+            po_columns[wh].append({
+                "column_key": col_key,
+                "warehouse": wh,
+                "po_date": po_date_raw,
+                "po_number": t["po_number"],
+            })
+            seen_column_keys.add(col_key)
+
+    # Sort each warehouse's columns newest first
+    for wh in po_columns:
+        po_columns[wh].sort(key=lambda c: c["po_date"], reverse=True)
+
+    # Build transit_lookup[mapping_id][column_key] = { qty, po_number, po_date }
+    transit_lookup: dict = {}
+    for t in transit_rows:
         mid = t["zypee_sku_mapping_id"]
         wh = t["warehouse"]
-        warehouses_with_po.add(wh)
-        transit_map.setdefault(mid, {}).setdefault(wh, []).append({
-            "id": t["id"],
+        po_date_raw = t["po_date"] or ""
+        po_date_key = po_date_raw.replace("-", "_")
+        col_key = f"{wh.lower()}_{po_date_key}"
+        transit_lookup.setdefault(mid, {})[col_key] = {
             "qty": t["qty"],
-            "po_date": t["po_date"],
             "po_number": t["po_number"],
-        })
+            "po_date": po_date_raw,
+        }
 
-    # po_status: per-warehouse flag so the frontend knows whether a PO was uploaded
-    po_status = {wh: (wh in warehouses_with_po) for wh in VALID_WAREHOUSES}
-
+    # Build rows
     rows = []
     for m in mappings:
         mid = m["id"]
         ws = ws_map.get(m.get("warehouse_stock_id"), {})
         stock = wh_stock_map.get(mid, {})
-        transit = transit_map.get(mid, {})
+        t_lookup = transit_lookup.get(mid, {})
 
-        def transit_val(wh):
-            """Return list of {id, qty, po_date, po_number} if PO exists for warehouse, else None."""
-            if wh in warehouses_with_po:
-                return transit.get(wh, [])
-            return None
-
-        rows.append({
+        row = {
             "mapping_id": mid,
             "zypee_sku_name": m["zypee_sku_name"],
             "wh_stock": ws.get("stock_qty", 0),
             "mum_stock": stock.get("MUM", 0),
-            "mum_in_transit": transit_val("MUM"),
             "pun_stock": stock.get("PUN", 0),
-            "pun_in_transit": transit_val("PUN"),
             "del_stock": stock.get("DEL", 0),
-            "del_in_transit": transit_val("DEL"),
             "blr_stock": stock.get("BLR", 0),
-            "blr_in_transit": transit_val("BLR"),
-        })
+        }
+
+        # Add one key per PO column
+        for wh_cols in po_columns.values():
+            for col in wh_cols:
+                row[col["column_key"]] = t_lookup.get(col["column_key"])
+
+        rows.append(row)
 
     rows.sort(key=lambda r: r["zypee_sku_name"])
-    return {"rows": rows, "po_status": po_status}
+    return {"rows": rows, "po_columns": po_columns}

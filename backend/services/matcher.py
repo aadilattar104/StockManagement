@@ -6,9 +6,9 @@ from typing import Optional
 MATCH_THRESHOLD = int(os.getenv("MATCH_THRESHOLD", "40"))
 
 NOISE_WORDS = {
-    "i", "the", "svasthyaa", "khakhra", "gms", "high", "protein",
-    "fiber", "fibre", "mix", "wheat", "millet", "worlds", "world",
-    "best", "khapli", "and", "or", "by", "of", "a", "an"
+    "i", "the", "svasthyaa", "gms", "high", "protein",
+    "fiber", "fibre", "mix", "wheat", "worlds", "world",
+    "best", "khapli", "or", "by", "of", "a", "an"
 }
 
 
@@ -76,7 +76,7 @@ def find_best_stock_match(product_name: str, gramage: str, stock_rows: list) -> 
         if product_grams is not None:
             stock_grams = extract_grams(str(row.get("weight", "")))
             if stock_grams is not None:
-                if abs(product_grams - stock_grams) > 15:
+                if abs(product_grams - stock_grams) > 4:
                     continue  # skip gramage mismatch
 
         if score > best_score:
@@ -110,7 +110,7 @@ def find_best_so_line_match(invoice_line: dict, so_lines: list) -> Optional[dict
         # Gramage check — strict ±15g when both sides have gramage
         if inv_grams is not None:
             sol_grams = extract_grams(str(sol.get("gramage", "") or ""))
-            if sol_grams is not None and abs(inv_grams - sol_grams) > 15:
+            if sol_grams is not None and abs(inv_grams - sol_grams) > 4:
                 continue  # gramage mismatch — skip
 
         if text_score > best_score:

@@ -55,10 +55,19 @@ export default function StatusBadge({ status, type = 'so', qty }) {
   }
 
   if (type === 'so_display') {
+    // Naturally fulfilled SO — green "Closed"
     if (status === 'closed') {
       return (
         <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border bg-emerald-900/50 text-emerald-300 border-emerald-800/50">
-          Closed
+          ✓ Closed
+        </span>
+      )
+    }
+    // Manually closed SO — slate/grey, distinct from natural fulfillment
+    if (status === 'closed_manual') {
+      return (
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border bg-slate-700/60 text-slate-300 border-slate-600/60">
+          ✕ Closed (manual)
         </span>
       )
     }
@@ -66,6 +75,13 @@ export default function StatusBadge({ status, type = 'so', qty }) {
       return (
         <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border bg-red-900/50 text-red-300 border-red-800/50">
           Invoice Not Uploaded
+        </span>
+      )
+    }
+    if (status === 'open') {
+      return (
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border bg-blue-900/50 text-blue-300 border-blue-800/50">
+          Open
         </span>
       )
     }

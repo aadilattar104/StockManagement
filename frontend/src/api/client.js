@@ -41,6 +41,10 @@ export const updateSOVendor = (id, vendor_name) =>
 export const deleteSalesOrder = (id) => api.delete(`/sales-orders/${id}`).then(r => r.data)
 export const cancelSalesOrderUpload = (pdfPath) =>
   api.post('/sales-orders/cancel-upload', { pdf_path: pdfPath })
+export const closeSalesOrder = (id) =>
+  api.post(`/sales-orders/${id}/close`).then(r => r.data)
+export const deleteAllSalesOrders = () =>
+  api.delete('/sales-orders').then(r => r.data)
 export const uploadSalesOrdersBulk = (files) => {
   const fd = new FormData()
   files.forEach(f => fd.append('files', f))
@@ -59,6 +63,8 @@ export const confirmInvoice = (invoice_data, pdf_path, linked_so_ids) =>
 export const deleteInvoice = (id) => api.delete(`/invoices/${id}`).then(r => r.data)
 export const cancelInvoiceUpload = (pdfPath) =>
   api.post('/invoices/cancel-upload', { pdf_path: pdfPath })
+export const deleteAllInvoices = () =>
+  api.delete('/invoices').then(r => r.data)
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 export const getDashboard = () => api.get('/dashboard').then(r => r.data)
@@ -84,3 +90,5 @@ export const uploadInTransit = (file) => { const fd = new FormData(); fd.append(
 export const getInTransit = () => api.get('/zypee/in-transit').then(r => r.data)
 export const deleteInTransit = (id) => api.delete(`/zypee/in-transit/${id}`).then(r => r.data)
 export const getZypeeCompareTable = () => api.get('/zypee/compare').then(r => r.data)
+export const replaceTransitPo = (payload) => api.post('/zypee/in-transit/replace-po', payload).then(r => r.data)
+export const deleteTransitPo = (payload) => api.delete('/zypee/in-transit/po', { data: payload }).then(r => r.data)

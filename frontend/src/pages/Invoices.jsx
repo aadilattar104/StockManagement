@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getInvoices, getInvoice, uploadInvoice, confirmInvoice, deleteInvoice, cancelInvoiceUpload } from '../api/client'
+import { getInvoices, getInvoice, uploadInvoice, confirmInvoice, deleteInvoice, cancelInvoiceUpload, deleteAllInvoices } from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import UploadZone from '../components/UploadZone'
 import Modal from '../components/Modal'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { Link } from 'react-router-dom'
-import { Upload, Eye, Trash2, Check, ExternalLink, ArrowLeft } from 'lucide-react'
+import { Upload, Eye, Trash2, Check, ExternalLink, ArrowLeft, Trash } from 'lucide-react'
 
 function fmt(d) {
   if (!d) return '—'
@@ -22,6 +22,7 @@ export default function Invoices() {
   const [pdfPath, setPdfPath] = useState('')
   const [linkedSos, setLinkedSos] = useState([])
   const [deleteTarget, setDeleteTarget] = useState(null)
+  const [deleteAll, setDeleteAll] = useState(false)
   const [detailId, setDetailId] = useState(null)
   const [error, setError] = useState(null)
 
@@ -61,6 +62,17 @@ export default function Invoices() {
     }
   })
 
+  const deleteAllMut = useMutation({
+    mutationFn: deleteAllInvoices,
+    onSuccess: () => {
+      qc.invalidateQueries(['invoices'])
+      qc.invalidateQueries(['sales-orders'])
+      qc.invalidateQueries(['stock'])
+      qc.invalidateQueries(['dashboard'])
+      setDeleteAll(false)
+    }
+  })
+
   // Called when user closes preview modal without confirming
   function handleCancelPreview() {
     if (pdfPath) {
@@ -78,9 +90,16 @@ export default function Invoices() {
           <h1 className="text-2xl font-bold text-slate-100">Invoices</h1>
           <p className="text-sm text-slate-500 mt-1">{invoices.length} invoices processed</p>
         </div>
-        <button onClick={() => setShowUpload(!showUpload)} className="btn-primary">
-          <Upload className="w-4 h-4" /> Upload Tax Invoice
-        </button>
+        <div className="flex items-center gap-2">
+          {invoices.length > 0 && (
+            <button onClick={() => setDeleteAll(true)} className="btn-danger flex items-center gap-1.5">
+              <Trash className="w-4 h-4" /> Delete All
+            </button>
+          )}
+          <button onClick={() => setShowUpload(!showUpload)} className="btn-primary">
+            <Upload className="w-4 h-4" /> Upload Tax Invoice
+          </button>
+        </div>
       </div>
 
       {showUpload && (
@@ -242,6 +261,16 @@ export default function Invoices() {
       {detailId && (
         <InvoiceDetailModal id={detailId} onClose={() => setDetailId(null)} />
       )}
+
+      <ConfirmDialog
+        open={deleteAll}
+        onClose={() => setDeleteAll(false)}
+        onConfirm={() => deleteAllMut.mutate()}
+        title="Delete All Invoices?"
+        message={`This will permanently remove all ${invoices.length} invoices.`}
+        warning="This will reverse all stock deductions and reopen all affected Sales Orders."
+        loading={deleteAllMut.isPending}
+      />
 
       <ConfirmDialog
         open={!!deleteTarget}

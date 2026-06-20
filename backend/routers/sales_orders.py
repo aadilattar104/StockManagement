@@ -273,12 +273,19 @@ async def list_sales_orders():
             qty_pending = sum(r.get("qty_pending", 0) for r in (fr_res.data or []))
         link_res = supabase.table("so_invoice_links").select("id", count="exact").eq("so_id", so_id).execute()
         has_invoice = (link_res.count or 0) > 0
-        if so_status == "fulfilled":
+
+        # Updated display_status logic — handles new 'closed' status
+        if so_status == "closed":
+            display_status = "closed_manual"
+        elif so_status == "fulfilled":
             display_status = "closed"
         elif so_status == "open" and not has_invoice:
             display_status = "invoice_pending"
+        elif so_status == "open":
+            display_status = "open"
         else:
             display_status = "partial"
+
         enriched.append({**so, "qty_pending": qty_pending, "has_invoice": has_invoice, "display_status": display_status})
     return enriched
 
@@ -337,6 +344,55 @@ async def update_vendor(so_id: str, body: VendorUpdateRequest):
     return result.data[0]
 
 
+# ─── NEW: Manual Close ────────────────────────────────────────────────────────
+
+@router.post("/{so_id}/close")
+async def close_sales_order(so_id: str):
+    """
+    Manually close an open or partial SO.
+    - Sets status = 'closed', closed_manually = True
+    - Zeroes qty_pending on all fulfilment_records for this SO's lines
+      (status forced to 'fulfilled' so the matrix stops counting them)
+    - Does NOT touch warehouse_stock.stock_qty (nothing was dispatched)
+    """
+    so_result = supabase.table("sales_orders").select("id,status,so_number").eq("id", so_id).execute()
+    if not so_result.data:
+        raise HTTPException(404, "Sales order not found")
+
+    so = so_result.data[0]
+    current_status = so.get("status", "open")
+
+    if current_status not in ("open", "partial"):
+        raise HTTPException(
+            400,
+            f"Cannot close SO '{so['so_number']}': current status is '{current_status}'. "
+            "Only open or partial SOs can be manually closed."
+        )
+
+    # Zero out all fulfilment_records for this SO's line items
+    lines_res = supabase.table("so_line_items").select("id").eq("so_id", so_id).execute()
+    line_ids = [l["id"] for l in (lines_res.data or [])]
+
+    for line_id in line_ids:
+        fr_res = supabase.table("fulfilment_records").select("id").eq("so_line_id", line_id).execute()
+        for fr in (fr_res.data or []):
+            supabase.table("fulfilment_records").update({
+                "qty_pending": 0,
+                "status": "fulfilled",
+            }).eq("id", fr["id"]).execute()
+
+    # Mark the SO as closed
+    update_res = supabase.table("sales_orders").update({
+        "status": "closed",
+        "closed_manually": True,
+    }).eq("id", so_id).execute()
+
+    if not update_res.data:
+        raise HTTPException(500, "Failed to close sales order")
+
+    return update_res.data[0]
+
+
 @router.delete("/{so_id}")
 async def delete_so(so_id: str):
     # Fetch pdf_path before deleting row
@@ -353,3 +409,12 @@ async def delete_so(so_id: str):
     _delete_from_storage(pdf_path)
 
     return {"deleted": so_id}
+
+@router.delete("")
+async def delete_all_sos():
+    """Delete every sales order (cascades line items, fulfilment records). Also cleans up PDFs."""
+    all_sos = supabase.table("sales_orders").select("id,pdf_path").execute()
+    for so in (all_sos.data or []):
+        _delete_from_storage(so.get("pdf_path", ""))
+    supabase.table("sales_orders").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+    return {"deleted": "all"}

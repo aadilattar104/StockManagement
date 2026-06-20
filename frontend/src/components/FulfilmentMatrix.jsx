@@ -21,6 +21,136 @@ function StatusChip({ status }) {
   )
 }
 
+// ─── Export helpers ───────────────────────────────────────────────────────────
+
+function buildTableData(rows, so_columns) {
+  const headers = [
+    'SKU',
+    'Weight',
+    ...so_columns.map(c => `${c.vendor_name} (${c.so_number})`),
+    'Qty To Be Sent',
+    'In Warehouse',
+    'Status',
+  ]
+
+  const body = rows.map(row => {
+    const status =
+      row.qty_to_be_sent === 0
+        ? 'No Demand'
+        : row.warehouse_stock >= row.qty_to_be_sent
+        ? 'Sufficient'
+        : 'Falling Short'
+    return [
+      row.sku_title,
+      row.sku_weight || '',
+      ...so_columns.map(c => row.so_qtys?.[c.so_id] || 0),
+      row.qty_to_be_sent,
+      row.warehouse_stock,
+      status,
+    ]
+  })
+
+  return { headers, body }
+}
+
+function exportToCSV(rows, so_columns) {
+  const { headers, body } = buildTableData(rows, so_columns)
+  const escape = v => (typeof v === 'string' && v.includes(',') ? `"${v}"` : v)
+  const lines = [headers.map(escape).join(','), ...body.map(r => r.map(escape).join(','))]
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `fulfilment-matrix-${new Date().toISOString().slice(0, 10)}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+async function exportToExcel(rows, so_columns) {
+  // Dynamically import SheetJS (already available in the project via npm)
+  let XLSX
+  try {
+    XLSX = await import('xlsx')
+  } catch {
+    alert('xlsx package not available. Use CSV export instead.')
+    return
+  }
+
+  const { headers, body } = buildTableData(rows, so_columns)
+  const wsData = [headers, ...body]
+  const ws = XLSX.utils.aoa_to_sheet(wsData)
+
+  // Column widths
+  ws['!cols'] = [
+    { wch: 36 }, // SKU
+    { wch: 10 }, // Weight
+    ...so_columns.map(() => ({ wch: 20 })),
+    { wch: 16 }, // Qty To Be Sent
+    { wch: 14 }, // In Warehouse
+    { wch: 14 }, // Status
+  ]
+
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, 'Fulfilment Matrix')
+  XLSX.writeFile(wb, `fulfilment-matrix-${new Date().toISOString().slice(0, 10)}.xlsx`)
+}
+
+function exportToPDF(rows, so_columns) {
+  const { headers, body } = buildTableData(rows, so_columns)
+
+  // Build a minimal print-ready HTML page and open it in a new window
+  const thStyle = 'padding:6px 10px;background:#1e293b;color:#94a3b8;font-size:11px;text-transform:uppercase;letter-spacing:.05em;border:1px solid #334155;white-space:nowrap;'
+  const tdStyle = 'padding:5px 10px;border:1px solid #334155;font-size:12px;color:#e2e8f0;white-space:nowrap;'
+  const tdNumStyle = tdStyle + 'text-align:right;font-family:monospace;'
+
+  const headerRow = headers.map(h => `<th style="${thStyle}">${h}</th>`).join('')
+  const bodyRows = body.map(row => {
+    const status = row[row.length - 1]
+    const rowStyle = status === 'Falling Short' ? 'background:#450a0a22;' : ''
+    const cells = row.map((v, i) => {
+      const isNum = typeof v === 'number'
+      return `<td style="${isNum ? tdNumStyle : tdStyle}">${v}</td>`
+    }).join('')
+    return `<tr style="${rowStyle}">${cells}</tr>`
+  }).join('')
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Fulfilment Matrix — ${new Date().toLocaleDateString('en-IN')}</title>
+  <style>
+    body { margin: 20px; background: #0f172a; font-family: system-ui, sans-serif; }
+    h2 { color: #e2e8f0; margin-bottom: 4px; font-size: 16px; }
+    p { color: #64748b; font-size: 12px; margin-bottom: 16px; }
+    table { border-collapse: collapse; width: 100%; }
+    @media print {
+      body { background: white; }
+      h2, p { color: #111; }
+      @page { size: landscape; margin: 15mm; }
+    }
+  </style>
+</head>
+<body>
+  <h2>Fulfilment Demand Matrix</h2>
+  <p>Generated ${new Date().toLocaleString('en-IN')} · ${rows.length} SKUs · ${so_columns.length} open SOs</p>
+  <table>
+    <thead><tr>${headerRow}</tr></thead>
+    <tbody>${bodyRows}</tbody>
+  </table>
+  <script>window.onload = () => { window.print(); }<\/script>
+</body>
+</html>`
+
+  const win = window.open('', '_blank')
+  if (win) {
+    win.document.write(html)
+    win.document.close()
+  }
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
+
 export default function FulfilmentMatrix() {
   const { data, isLoading, error } = useQuery({
     queryKey: ['fulfilment-matrix'],
@@ -41,23 +171,44 @@ export default function FulfilmentMatrix() {
       </div>
     )
 
-  const { skus = [], so_columns = [], rows = [] } = data || {}
+  const { so_columns = [], rows = [] } = data || {}
 
   if (!rows.length)
     return (
       <div className="card p-8 text-center text-slate-500 text-sm">
-        No open sales orders to display. Upload an SO to see the fulfilment matrix.
+        No active SKUs found. Upload stock data to see the fulfilment matrix.
       </div>
     )
 
   return (
     <div className="card overflow-hidden">
       {/* Header */}
-      <div className="px-5 py-4 border-b border-slate-800">
-        <h2 className="text-sm font-semibold text-slate-200">Fulfilment Demand Matrix</h2>
-        <p className="text-xs text-slate-500 mt-0.5">
-          SKU demand across all open sales orders vs current warehouse stock
-        </p>
+      <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-200">Fulfilment Demand Matrix</h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            {rows.length} active SKUs · {so_columns.length} open SO{so_columns.length !== 1 ? 's' : ''} · live pending quantities
+          </p>
+        </div>
+
+        {/* Export buttons */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => exportToCSV(rows, so_columns)}
+            className="text-xs px-3 py-1.5 rounded border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition-colors"
+            title="Download as CSV"
+          >
+            ↓ CSV
+          </button>
+          <button
+            onClick={() => exportToExcel(rows, so_columns)}
+            className="text-xs px-3 py-1.5 rounded border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition-colors"
+            title="Download as Excel"
+          >
+            ↓ Excel
+          </button>
+
+        </div>
       </div>
 
       {/* Scrollable table */}
@@ -85,9 +236,9 @@ export default function FulfilmentMatrix() {
                 </th>
               ))}
 
-              {/* Total ordered */}
-              <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap border-r border-slate-700 min-w-[100px]">
-                Total Ordered
+              {/* Qty To Be Sent — renamed from "Total Ordered", now live pending */}
+              <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap border-r border-slate-700 min-w-[120px]">
+                Qty To Be Sent
               </th>
 
               {/* Warehouse stock */}
@@ -104,11 +255,12 @@ export default function FulfilmentMatrix() {
 
           <tbody className="divide-y divide-slate-800/60">
             {rows.map((row, idx) => {
-              const shortage = row.total_ordered - row.warehouse_stock
+              // Use qty_to_be_sent (live pending) for status — not the old total_ordered
+              const shortage = row.qty_to_be_sent - row.warehouse_stock
               const status =
-                row.total_ordered === 0
+                row.qty_to_be_sent === 0
                   ? 'no_demand'
-                  : row.warehouse_stock >= row.total_ordered
+                  : row.warehouse_stock >= row.qty_to_be_sent
                   ? 'sufficient'
                   : 'falling_short'
 
@@ -130,7 +282,7 @@ export default function FulfilmentMatrix() {
                     )}
                   </td>
 
-                  {/* Qty per SO */}
+                  {/* Qty per SO — static qty_ordered, unchanged after dispatch */}
                   {so_columns.map((col) => {
                     const qty = row.so_qtys?.[col.so_id] ?? 0
                     return (
@@ -147,10 +299,10 @@ export default function FulfilmentMatrix() {
                     )
                   })}
 
-                  {/* Total ordered */}
+                  {/* Qty To Be Sent — live sum of qty_pending */}
                   <td className="px-4 py-3 text-right font-mono font-bold border-r border-slate-700">
-                    <span className={row.total_ordered > 0 ? 'text-amber-400' : 'text-slate-600'}>
-                      {row.total_ordered || '—'}
+                    <span className={row.qty_to_be_sent > 0 ? 'text-amber-400' : 'text-slate-600'}>
+                      {row.qty_to_be_sent > 0 ? row.qty_to_be_sent : '—'}
                     </span>
                   </td>
 
@@ -167,7 +319,7 @@ export default function FulfilmentMatrix() {
                     >
                       {row.warehouse_stock}
                     </span>
-                    {status === 'falling_short' && row.total_ordered > 0 && (
+                    {status === 'falling_short' && row.qty_to_be_sent > 0 && (
                       <div className="text-xs text-red-400 mt-0.5">−{shortage} short</div>
                     )}
                   </td>

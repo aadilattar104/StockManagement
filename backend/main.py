@@ -113,77 +113,72 @@ async def dashboard():
 @app.get("/api/dashboard/fulfilment-matrix")
 async def fulfilment_matrix():
     """
-    Pivot matrix: SKUs as rows, open SOs as columns.
-    Each cell = qty_ordered for that SKU in that SO.
-    Also returns warehouse stock and falling-short status per SKU.
-    Only includes ACTIVE SKUs (is_active=True).
+    Pivot matrix: ALL active SKUs as rows, open/partial SOs as columns.
+    - Rows = every active warehouse_stock row (is_active=True), even with zero demand.
+    - Per-SO columns = static qty_ordered (original order, never changes after dispatch).
+    - qty_to_be_sent = live sum of fulfilment_records.qty_pending across open/partial SOs.
     """
-    # 1. Get all open/partial SOs
+    # 1. All active SKUs — this is now the base row set
+    stock_res = supabase.table("warehouse_stock") \
+        .select("id,title,weight,stock_qty") \
+        .eq("is_active", True).execute()
+    all_stock = stock_res.data or []
+    stock_map = {s["id"]: s for s in all_stock}
+
+    # 2. All open/partial SOs (closed/fulfilled excluded — their demand is done)
     sos_res = supabase.table("sales_orders").select("id,so_number,vendor_name") \
         .in_("status", ["open", "partial"]).order("uploaded_at").execute()
     sos = sos_res.data or []
-
-    if not sos:
-        return {"so_columns": [], "rows": []}
-
     so_ids = [s["id"] for s in sos]
 
-    # 2. Get SO line items for these SOs
-    lines_res = supabase.table("so_line_items") \
-        .select("so_id,matched_stock_id,qty_ordered") \
-        .in_("so_id", so_ids).execute()
-    lines = lines_res.data or []
+    # Build pivot structures (empty by default — filled in if there are open SOs)
+    # so_qtys[sku_id][so_id] = static qty_ordered
+    so_qtys: dict = defaultdict(lambda: defaultdict(int))
+    # pending[sku_id] = sum of qty_pending from fulfilment_records
+    pending: dict = defaultdict(int)
 
-    # 3. Unique matched stock IDs from SO lines
-    all_matched_stock_ids = list({l["matched_stock_id"] for l in lines if l.get("matched_stock_id")})
+    if so_ids:
+        # 3. SO line items for open/partial SOs — for the static per-SO columns
+        lines_res = supabase.table("so_line_items") \
+            .select("id,so_id,matched_stock_id,qty_ordered") \
+            .in_("so_id", so_ids).execute()
+        lines = lines_res.data or []
 
-    if not all_matched_stock_ids:
-        return {
-            "so_columns": [
-                {"so_id": s["id"], "so_number": s["so_number"], "vendor_name": s["vendor_name"]}
-                for s in sos
-            ],
-            "rows": [],
-        }
+        # Build line_id -> matched_stock_id index for the fulfilment lookup
+        line_id_to_stock: dict = {}
+        for line in lines:
+            sid = line.get("matched_stock_id")
+            if sid and sid in stock_map:
+                so_qtys[sid][line["so_id"]] += line.get("qty_ordered", 0)
+                line_id_to_stock[line["id"]] = sid
 
-    # 4. Fetch ONLY ACTIVE warehouse stock for those SKUs
-    #    This is the key fix: .eq("is_active", True) ensures inactive SKUs
-    #    (stock_qty=0 and manually marked inactive) never appear in the matrix.
-    stock_res = supabase.table("warehouse_stock") \
-        .select("id,title,weight,stock_qty") \
-        .in_("id", all_matched_stock_ids) \
-        .eq("is_active", True).execute()
-    stock_map = {s["id"]: s for s in (stock_res.data or [])}
+        # 4. Fulfilment records for those lines — for the live qty_to_be_sent
+        if line_id_to_stock:
+            line_ids = list(line_id_to_stock.keys())
+            fr_res = supabase.table("fulfilment_records") \
+                .select("so_line_id,qty_pending") \
+                .in_("so_line_id", line_ids).execute()
+            for fr in (fr_res.data or []):
+                stock_id = line_id_to_stock.get(fr["so_line_id"])
+                if stock_id:
+                    pending[stock_id] += fr.get("qty_pending", 0)
 
-    # Only keep lines whose matched stock is active
-    active_stock_ids = set(stock_map.keys())
-
-    # 5. Build pivot: sku_id -> { so_id -> total qty_ordered }
-    #    Skip lines where the matched stock is inactive
-    pivot = defaultdict(lambda: defaultdict(int))
-    for line in lines:
-        sid = line.get("matched_stock_id")
-        if sid and sid in active_stock_ids:
-            pivot[sid][line["so_id"]] += line.get("qty_ordered", 0)
-
-    # 6. Build rows — only SKUs that have at least one SO with qty > 0
+    # 5. Build rows — one per active SKU, even with zero demand
     rows = []
-    for sku_id, so_qtys in pivot.items():
-        total_ordered = sum(so_qtys.values())
-        if total_ordered == 0:
-            continue  # skip SKUs with no active demand
-        sku = stock_map.get(sku_id, {})
+    for sku in all_stock:
+        sku_id = sku["id"]
+        qty_to_be_sent = pending.get(sku_id, 0)
         rows.append({
             "sku_id": sku_id,
             "sku_title": sku.get("title", "Unknown SKU"),
             "sku_weight": sku.get("weight"),
             "warehouse_stock": sku.get("stock_qty", 0),
-            "total_ordered": total_ordered,
-            "so_qtys": dict(so_qtys),
+            "qty_to_be_sent": qty_to_be_sent,
+            "so_qtys": dict(so_qtys.get(sku_id, {})),
         })
 
-    # Sort: falling short first, then alphabetical
-    rows.sort(key=lambda r: (r["warehouse_stock"] >= r["total_ordered"], r["sku_title"]))
+    # 6. Sort: falling short first (stock < demand), then alphabetical
+    rows.sort(key=lambda r: (r["warehouse_stock"] >= r["qty_to_be_sent"], r["sku_title"]))
 
     return {
         "so_columns": [

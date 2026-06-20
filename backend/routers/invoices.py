@@ -31,6 +31,11 @@ def _delete_from_storage(storage_path: str):
 
 
 def _recompute_so_status(so_id: str):
+    # Guard: never overwrite a manually-closed SO — closing is irreversible
+    so_check = supabase.table("sales_orders").select("status").eq("id", so_id).execute()
+    if so_check.data and so_check.data[0].get("status") == "closed":
+        return  # skip recomputation — closed SOs stay closed
+
     lines_result = supabase.table("so_line_items").select("id,qty_ordered").eq("so_id", so_id).execute()
     lines = lines_result.data or []
 
@@ -343,8 +348,78 @@ async def delete_invoice(invoice_id: str):
     # Delete PDF from Supabase Storage
     _delete_from_storage(pdf_path)
 
-    # Recompute SO statuses
+    # Recompute SO statuses — guard inside _recompute_so_status skips closed SOs
     for so_id in linked_so_ids:
         _recompute_so_status(so_id)
 
     return {"deleted": invoice_id}
+
+@router.delete("")
+async def delete_all_invoices():
+    """
+    Delete every invoice. For each one:
+    - Reverses stock deductions
+    - Reverses fulfilment records
+    - Recomputes SO statuses (skips closed SOs)
+    - Deletes PDF from storage
+    """
+    all_invoices = supabase.table("invoices").select("id,pdf_path").execute()
+
+    for inv in (all_invoices.data or []):
+        invoice_id = inv["id"]
+
+        lines_result = supabase.table("invoice_line_items").select("*").eq(
+            "invoice_id", invoice_id
+        ).execute()
+        lines = lines_result.data or []
+
+        # Reverse stock deductions
+        for line in lines:
+            stock_id = line.get("matched_stock_id")
+            qty = line.get("qty_dispatched", 0)
+            if stock_id and qty > 0:
+                stock_result = supabase.table("warehouse_stock").select("stock_qty").eq(
+                    "id", stock_id
+                ).execute()
+                if stock_result.data:
+                    current_qty = stock_result.data[0].get("stock_qty", 0)
+                    supabase.table("warehouse_stock").update(
+                        {"stock_qty": current_qty + qty}
+                    ).eq("id", stock_id).execute()
+
+        # Reverse fulfilment records
+        for line in lines:
+            il_id = line.get("id")
+            qty = line.get("qty_dispatched", 0)
+            fr_result = supabase.table("fulfilment_records").select("*").eq(
+                "invoice_line_id", il_id
+            ).execute()
+            for fr in (fr_result.data or []):
+                new_dispatched = max(0, fr.get("qty_dispatched", 0) - qty)
+                qty_ordered = fr.get("qty_ordered", 0)
+                qty_pending = max(0, qty_ordered - new_dispatched)
+                status = "not_sent" if new_dispatched == 0 else ("fulfilled" if qty_pending == 0 else "partial")
+                supabase.table("fulfilment_records").update({
+                    "invoice_line_id": None,
+                    "qty_dispatched": new_dispatched,
+                    "qty_pending": qty_pending,
+                    "status": status,
+                }).eq("id", fr["id"]).execute()
+
+        # Get linked SO IDs before deleting
+        links_result = supabase.table("so_invoice_links").select("so_id").eq(
+            "invoice_id", invoice_id
+        ).execute()
+        linked_so_ids = [l["so_id"] for l in (links_result.data or [])]
+
+        # Delete DB row (cascades invoice_line_items + so_invoice_links)
+        supabase.table("invoices").delete().eq("id", invoice_id).execute()
+
+        # Delete PDF from storage
+        _delete_from_storage(inv.get("pdf_path", ""))
+
+        # Recompute SO statuses
+        for so_id in linked_so_ids:
+            _recompute_so_status(so_id)
+
+    return {"deleted": "all"}

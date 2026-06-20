@@ -1,27 +1,41 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getSalesOrders, uploadSalesOrder, uploadSalesOrdersBulk, confirmSalesOrder, deleteSalesOrder, cancelSalesOrderUpload } from '../api/client'
+import {
+  getSalesOrders, uploadSalesOrder, uploadSalesOrdersBulk,
+  confirmSalesOrder, deleteSalesOrder, cancelSalesOrderUpload,
+  closeSalesOrder, deleteAllSalesOrders,
+} from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import UploadZone from '../components/UploadZone'
 import Modal from '../components/Modal'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { Link } from 'react-router-dom'
-import { Upload, Eye, Trash2, Check, AlertTriangle } from 'lucide-react'
+import { Upload, Eye, Trash2, Check, AlertTriangle, XCircle, Trash } from 'lucide-react'
 
 function fmt(d) {
   if (!d) return '—'
   return new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
+// Tab definitions — "Closed" tab includes both naturally fulfilled and manually closed
+const TABS = [
+  { key: 'open',    label: 'Open',    match: s => s.display_status === 'open' || s.display_status === 'invoice_pending' },
+  { key: 'partial', label: 'Partial', match: s => s.display_status === 'partial' },
+  { key: 'closed',  label: 'Closed',  match: s => s.display_status === 'closed' || s.display_status === 'closed_manual' },
+]
+
 export default function SalesOrders() {
   const qc = useQueryClient()
   const { data: orders = [], isLoading } = useQuery({ queryKey: ['sales-orders'], queryFn: getSalesOrders })
 
+  const [activeTab, setActiveTab] = useState('open')
   const [previewData, setPreviewData] = useState(null)
   const [pdfPath, setPdfPath] = useState('')
   const [editedVendor, setEditedVendor] = useState('')
   const [showUpload, setShowUpload] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState(null)
+  const [deleteAll, setDeleteAll] = useState(false)
+  const [closeTarget, setCloseTarget] = useState(null)
   const [error, setError] = useState(null)
 
   const uploadMut = useMutation({
@@ -60,14 +74,33 @@ export default function SalesOrders() {
     onSuccess: () => { qc.invalidateQueries(['sales-orders']); setDeleteTarget(null) }
   })
 
-  // Called when user closes preview modal without confirming
+  const deleteAllMut = useMutation({
+    mutationFn: deleteAllSalesOrders,
+    onSuccess: () => { qc.invalidateQueries(['sales-orders']); setDeleteAll(false) }
+  })
+
+  const closeMut = useMutation({
+    mutationFn: (id) => closeSalesOrder(id),
+    onSuccess: () => {
+      // Invalidate both SO list and the fulfilment matrix (qty_to_be_sent changes)
+      qc.invalidateQueries(['sales-orders'])
+      qc.invalidateQueries(['fulfilment-matrix'])
+      setCloseTarget(null)
+    },
+    onError: (e) => setError(e.message)
+  })
+
   function handleCancelPreview() {
-    if (pdfPath) {
-      cancelSalesOrderUpload(pdfPath)  // fire-and-forget — delete from Supabase Storage
-    }
+    if (pdfPath) cancelSalesOrderUpload(pdfPath)
     setPreviewData(null)
     setPdfPath('')
   }
+
+  // Compute per-tab counts client-side from already-fetched list
+  const tabCounts = {}
+  TABS.forEach(t => { tabCounts[t.key] = orders.filter(t.match).length })
+
+  const visibleOrders = orders.filter(TABS.find(t => t.key === activeTab)?.match ?? (() => true))
 
   return (
     <div className="px-8 py-8 max-w-7xl space-y-6">
@@ -76,9 +109,16 @@ export default function SalesOrders() {
           <h1 className="text-2xl font-bold text-slate-100">Sales Orders</h1>
           <p className="text-sm text-slate-500 mt-1">{orders.length} orders total</p>
         </div>
-        <button onClick={() => setShowUpload(!showUpload)} className="btn-primary">
-          <Upload className="w-4 h-4" /> Upload SO PDF
-        </button>
+        <div className="flex items-center gap-2">
+          {orders.length > 0 && (
+            <button onClick={() => setDeleteAll(true)} className="btn-danger flex items-center gap-1.5">
+              <Trash className="w-4 h-4" /> Delete All
+            </button>
+          )}
+          <button onClick={() => setShowUpload(!showUpload)} className="btn-primary">
+            <Upload className="w-4 h-4" /> Upload SO PDF
+          </button>
+        </div>
       </div>
 
       {showUpload && (
@@ -113,6 +153,32 @@ export default function SalesOrders() {
         </div>
       )}
 
+      {/* Tabs */}
+      <div className="flex gap-1 border-b border-slate-800">
+        {TABS.map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px flex items-center gap-2 ${
+              activeTab === tab.key
+                ? 'border-brand-500 text-brand-400'
+                : 'border-transparent text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            {tab.label}
+            {tabCounts[tab.key] > 0 && (
+              <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${
+                activeTab === tab.key
+                  ? 'bg-brand-500/20 text-brand-300'
+                  : 'bg-slate-700 text-slate-400'
+              }`}>
+                {tabCounts[tab.key]}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
       {/* Table */}
       <div className="card overflow-hidden">
         <table className="w-full">
@@ -127,19 +193,25 @@ export default function SalesOrders() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800/60">
-            {isLoading && <tr><td colSpan={6} className="text-center py-12 text-slate-500 text-sm">Loading…</td></tr>}
-            {!isLoading && orders.length === 0 && (
+            {isLoading && (
+              <tr><td colSpan={6} className="text-center py-12 text-slate-500 text-sm">Loading…</td></tr>
+            )}
+            {!isLoading && visibleOrders.length === 0 && (
               <tr><td colSpan={6} className="text-center py-12 text-slate-500 text-sm">
-                No sales orders yet. Upload a PDF to begin.
+                {activeTab === 'open' && 'No open sales orders. Upload a PDF to begin.'}
+                {activeTab === 'partial' && 'No partially fulfilled orders.'}
+                {activeTab === 'closed' && 'No closed or fulfilled orders yet.'}
               </td></tr>
             )}
-            {orders.map(so => (
+            {visibleOrders.map(so => (
               <tr key={so.id} className="hover:bg-slate-800/30 transition-colors">
                 <td className="table-cell font-mono text-sm font-medium text-slate-200">{so.so_number}</td>
                 <td className="table-cell text-slate-400">{fmt(so.so_date)}</td>
                 <td className="table-cell text-slate-300">{so.vendor_name || '—'}</td>
                 <td className="table-cell text-right font-mono text-slate-300">{so.total_qty}</td>
-                <td className="table-cell"><StatusBadge type="so_display" status={so.display_status} qty={so.qty_pending} /></td>
+                <td className="table-cell">
+                  <StatusBadge type="so_display" status={so.display_status} qty={so.qty_pending} />
+                </td>
                 <td className="table-cell text-right">
                   <div className="flex items-center justify-end gap-1">
                     <Link to={`/sales-orders/${so.id}`}
@@ -147,6 +219,18 @@ export default function SalesOrders() {
                       title="View detail">
                       <Eye className="w-3.5 h-3.5" />
                     </Link>
+
+                    {/* Close SO button — only on partial SOs */}
+                    {so.display_status === 'partial' && (
+                      <button
+                        onClick={() => setCloseTarget(so)}
+                        className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-amber-700/50 bg-amber-900/20 text-amber-400 hover:bg-amber-900/40 hover:text-amber-300 transition-colors"
+                        title="Close SO manually"
+                      >
+                        <XCircle className="w-3 h-3" /> Close SO
+                      </button>
+                    )}
+
                     <button onClick={() => setDeleteTarget(so)}
                       className="p-1.5 hover:bg-red-900/30 rounded text-slate-400 hover:text-red-400 transition-colors"
                       title="Delete">
@@ -161,7 +245,6 @@ export default function SalesOrders() {
       </div>
 
       {/* Preview Modal */}
-      {/* onClose calls handleCancelPreview so PDF is deleted from storage if user doesn't confirm */}
       <Modal open={!!previewData} onClose={handleCancelPreview} title="Review Extracted Sales Order" size="lg">
         {previewData && (
           <div className="space-y-5">
@@ -222,7 +305,6 @@ export default function SalesOrders() {
             {error && <p className="text-sm text-red-400">{error}</p>}
 
             <div className="flex justify-end gap-3">
-              {/* Cancel button also calls handleCancelPreview to clean up storage */}
               <button onClick={handleCancelPreview} className="btn-secondary">Cancel</button>
               <button onClick={() => confirmMut.mutate()} disabled={confirmMut.isPending} className="btn-primary">
                 <Check className="w-4 h-4" />
@@ -233,6 +315,18 @@ export default function SalesOrders() {
         )}
       </Modal>
 
+      {/* Delete All confirm */}
+      <ConfirmDialog
+        open={deleteAll}
+        onClose={() => setDeleteAll(false)}
+        onConfirm={() => deleteAllMut.mutate()}
+        title="Delete All Sales Orders?"
+        message={`This will permanently remove all ${orders.length} sales orders.`}
+        warning="This cannot be undone. Stock already dispatched against these SOs will not be reversed."
+        loading={deleteAllMut.isPending}
+      />
+
+      {/* Delete confirm */}
       <ConfirmDialog
         open={!!deleteTarget}
         onClose={() => setDeleteTarget(null)}
@@ -241,6 +335,17 @@ export default function SalesOrders() {
         message={`Remove SO ${deleteTarget?.so_number}?`}
         warning="This will not reverse stock already dispatched against this SO."
         loading={deleteMut.isPending}
+      />
+
+      {/* Close SO confirm — deliberate dialog per spec C.3 */}
+      <ConfirmDialog
+        open={!!closeTarget}
+        onClose={() => setCloseTarget(null)}
+        onConfirm={() => closeMut.mutate(closeTarget.id)}
+        title="Close this Sales Order?"
+        message={`Close SO ${closeTarget?.so_number} with ${closeTarget?.qty_pending ?? 0} units still pending?`}
+        warning="This cannot be undone. The pending quantity will not be deducted from warehouse stock — only dispatched quantities affect stock."
+        loading={closeMut.isPending}
       />
     </div>
   )

@@ -33,6 +33,7 @@ function WarehouseBadge({ code }) {
 function StockTab({ uploads, uploadsLoading, setDeleteTarget }) {
   const [selectedWarehouse, setSelectedWarehouse] = useState('')
   const [selectedDate, setSelectedDate] = useState('')
+  const [skuSearch, setSkuSearch] = useState('')
 
   const availableDates = useMemo(() => {
     if (!selectedWarehouse) return []
@@ -49,6 +50,12 @@ function StockTab({ uploads, uploadsLoading, setDeleteTarget }) {
     queryFn: () => getZypeeStock(selectedWarehouse, effectiveDate),
     enabled: !!selectedWarehouse && !!effectiveDate,
   })
+
+  const filteredStockRows = useMemo(() => {
+    if (!skuSearch.trim()) return stockRows
+    const s = skuSearch.toLowerCase()
+    return stockRows.filter(r => r.name?.toLowerCase().includes(s))
+  }, [stockRows, skuSearch])
 
   function handleDownload() {
     if (!stockRows.length) return
@@ -107,7 +114,7 @@ function StockTab({ uploads, uploadsLoading, setDeleteTarget }) {
             <label className="text-xs text-slate-500">City</label>
             <select
               value={selectedWarehouse}
-              onChange={e => { setSelectedWarehouse(e.target.value); setSelectedDate('') }}
+              onChange={e => { setSelectedWarehouse(e.target.value); setSelectedDate(''); setSkuSearch('') }}
               className="bg-slate-800 border border-slate-700 text-slate-200 text-sm rounded px-3 py-1.5 focus:outline-none focus:border-brand-500"
             >
               <option value="">— Select city —</option>
@@ -126,6 +133,18 @@ function StockTab({ uploads, uploadsLoading, setDeleteTarget }) {
                 {availableDates.length === 0 && <option value="">No uploads for {selectedWarehouse}</option>}
                 {availableDates.map(d => <option key={d} value={d}>{fmt(d)}</option>)}
               </select>
+            </div>
+          )}
+          {selectedWarehouse && (
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+              <input
+                type="text"
+                value={skuSearch}
+                onChange={e => setSkuSearch(e.target.value)}
+                placeholder="Search SKUs…"
+                className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded pl-8 pr-3 py-1.5 focus:outline-none focus:border-brand-500 placeholder-slate-600 w-48"
+              />
             </div>
           )}
           {stockRows.length > 0 && (
@@ -150,7 +169,7 @@ function StockTab({ uploads, uploadsLoading, setDeleteTarget }) {
                 <span className="text-xs text-slate-500">·</span>
                 <span className="text-xs text-slate-500">{fmt(effectiveDate)}</span>
                 <span className="text-xs text-slate-500">·</span>
-                <span className="text-xs text-slate-500">{stockRows.length} SKUs</span>
+                <span className="text-xs text-slate-500">{skuSearch ? `${filteredStockRows.length} of ${stockRows.length}` : `${stockRows.length}`} SKUs</span>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -162,8 +181,8 @@ function StockTab({ uploads, uploadsLoading, setDeleteTarget }) {
                   </thead>
                   <tbody className="divide-y divide-slate-800/60">
                     {stockLoading && <tr><td colSpan={2} className="py-12 text-center text-slate-500 text-sm">Loading…</td></tr>}
-                    {!stockLoading && stockRows.length === 0 && <tr><td colSpan={2} className="py-12 text-center text-slate-500 text-sm">No data found.</td></tr>}
-                    {stockRows.map(row => (
+                    {!stockLoading && filteredStockRows.length === 0 && <tr><td colSpan={2} className="py-12 text-center text-slate-500 text-sm">{skuSearch ? 'No SKUs match your search.' : 'No data found.'}</td></tr>}
+                    {filteredStockRows.map(row => (
                       <tr key={row.id} className="hover:bg-slate-800/30 transition-colors">
                         <td className="px-4 py-3 text-slate-200">{row.name}</td>
                         <td className="px-4 py-3 text-right font-mono font-semibold">
@@ -868,6 +887,7 @@ function saveSkus(list) {
 // ── SKU MASTER TAB ────────────────────────────────────────────────────────────
 function SkuMasterTab() {
   const [skus, setSkus] = useState(() => loadSkus())
+  const [selectedSkus, setSelectedSkus] = useState(() => new Set(loadSkus()))
   const [newSku, setNewSku] = useState('')
   const [genWarehouse, setGenWarehouse] = useState('MUM')
   const [genDate, setGenDate] = useState(() => {
@@ -879,7 +899,59 @@ function SkuMasterTab() {
   const [editIdx, setEditIdx] = useState(null)
   const [editVal, setEditVal] = useState('')
 
-  function persist(next) { setSkus(next); saveSkus(next) }
+  function persist(next) {
+    setSkus(next)
+    saveSkus(next)
+    // keep selectedSkus in sync: remove any SKUs no longer in the list
+    setSelectedSkus(prev => {
+      const nextSet = new Set(prev)
+      for (const s of prev) { if (!next.includes(s)) nextSet.delete(s) }
+      return nextSet
+    })
+  }
+
+  // Fetch all uploads → latest per warehouse → stock rows for qty lookup
+  const { data: allUploads = [] } = useQuery({
+    queryKey: ['zypee-uploads'],
+    queryFn: getZypeeUploads,
+  })
+
+  const latestByWarehouse = useMemo(() => {
+    const map = {}
+    for (const u of allUploads) {
+      if (!map[u.warehouse] || u.stock_date > map[u.warehouse].stock_date) {
+        map[u.warehouse] = u
+      }
+    }
+    return Object.values(map)
+  }, [allUploads])
+
+  // Fetch stock for each latest warehouse upload
+  const mumUpload = latestByWarehouse.find(u => u.warehouse === 'MUM')
+  const punUpload = latestByWarehouse.find(u => u.warehouse === 'PUN')
+  const delUpload = latestByWarehouse.find(u => u.warehouse === 'DEL')
+  const blrUpload = latestByWarehouse.find(u => u.warehouse === 'BLR')
+
+  const { data: mumStock = [] } = useQuery({ queryKey: ['zypee-stock', 'MUM', mumUpload?.stock_date], queryFn: () => getZypeeStock('MUM', mumUpload.stock_date), enabled: !!mumUpload })
+  const { data: punStock = [] } = useQuery({ queryKey: ['zypee-stock', 'PUN', punUpload?.stock_date], queryFn: () => getZypeeStock('PUN', punUpload.stock_date), enabled: !!punUpload })
+  const { data: delStock = [] } = useQuery({ queryKey: ['zypee-stock', 'DEL', delUpload?.stock_date], queryFn: () => getZypeeStock('DEL', delUpload.stock_date), enabled: !!delUpload })
+  const { data: blrStock = [] } = useQuery({ queryKey: ['zypee-stock', 'BLR', blrUpload?.stock_date], queryFn: () => getZypeeStock('BLR', blrUpload.stock_date), enabled: !!blrUpload })
+
+  const stockByWarehouse = { MUM: mumStock, PUN: punStock, DEL: delStock, BLR: blrStock }
+
+  function toggleSku(sku) {
+    setSelectedSkus(prev => {
+      const next = new Set(prev)
+      if (next.has(sku)) next.delete(sku)
+      else next.add(sku)
+      return next
+    })
+  }
+
+  function toggleAll() {
+    if (selectedSkus.size === skus.length) setSelectedSkus(new Set())
+    else setSelectedSkus(new Set(skus))
+  }
 
   function addSku() {
     const v = newSku.trim()
@@ -928,11 +1000,26 @@ function SkuMasterTab() {
   }
 
   function generateCsv() {
-    // filename: WAREHOUSE_DD-MM-YYYY.csv
+    const toDownload = skus.filter(s => selectedSkus.has(s))
+    if (!toDownload.length) return
+
+    // Build name→qty from latest Zypee stock for selected warehouse
+    const warehouseStockRows = stockByWarehouse[genWarehouse] || []
+    const nameToQty = {}
+    for (const row of warehouseStockRows) {
+      if (row.name) nameToQty[row.name.trim().toLowerCase()] = row.old_quantity ?? 0
+    }
+
     const [year, month, day] = genDate.split('-')
     const filename = `${genWarehouse}_${day}-${month}-${year}.csv`
-    const sorted = sortSkusForDownload(skus)
-    const lines = ['sku,name,old_quantity', ...sorted.map(s => `,"${s}",0`)]
+    const sorted = sortSkusForDownload(toDownload)
+    const lines = [
+      'sku,name,old_quantity',
+      ...sorted.map(s => {
+        const qty = nameToQty[s.trim().toLowerCase()] ?? 0
+        return `,\"${s}\",${qty}`
+      })
+    ]
     const blob = new Blob([lines.join('\n')], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -948,9 +1035,20 @@ function SkuMasterTab() {
       <div className="xl:col-span-3 card overflow-hidden flex flex-col">
         <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={skus.length > 0 && selectedSkus.size === skus.length}
+              ref={el => { if (el) el.indeterminate = selectedSkus.size > 0 && selectedSkus.size < skus.length }}
+              onChange={toggleAll}
+              className="w-3.5 h-3.5 accent-brand-500 cursor-pointer"
+              title="Select / deselect all"
+            />
             <BookOpen className="w-4 h-4 text-slate-500" />
             <h2 className="text-sm font-semibold text-slate-200">SKU Master List</h2>
             <span className="ml-1 text-xs text-slate-600 bg-slate-800 px-2 py-0.5 rounded-full">{skus.length}</span>
+            {selectedSkus.size > 0 && selectedSkus.size < skus.length && (
+              <span className="text-xs text-brand-400">{selectedSkus.size} selected</span>
+            )}
           </div>
           <button
             onClick={resetToDefault}
@@ -997,6 +1095,13 @@ function SkuMasterTab() {
               }`}
             >
               <GripVertical className="w-3.5 h-3.5 text-slate-700 group-hover:text-slate-500 flex-shrink-0" />
+              <input
+                type="checkbox"
+                checked={selectedSkus.has(sku)}
+                onChange={() => toggleSku(sku)}
+                onClick={e => e.stopPropagation()}
+                className="w-3.5 h-3.5 accent-brand-500 cursor-pointer flex-shrink-0"
+              />
               <span className="text-xs text-slate-500 w-5 flex-shrink-0 font-mono">{i + 1}</span>
 
               {editIdx === i ? (
@@ -1097,11 +1202,11 @@ function SkuMasterTab() {
 
           <button
             onClick={generateCsv}
-            disabled={!skus.length || !genDate}
+            disabled={!selectedSkus.size || !genDate}
             className="w-full btn-primary justify-center disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Download className="w-4 h-4" />
-            Download CSV ({skus.length} SKUs)
+            Download CSV ({selectedSkus.size} / {skus.length} SKUs)
           </button>
         </div>
 
@@ -1111,8 +1216,8 @@ function SkuMasterTab() {
           <ol className="space-y-2 text-xs text-slate-500">
             <li className="flex gap-2"><span className="text-brand-400 font-bold flex-shrink-0">1.</span>Manage your SKU list on the left (add / remove / reorder)</li>
             <li className="flex gap-2"><span className="text-brand-400 font-bold flex-shrink-0">2.</span>Pick warehouse + date, click Download CSV</li>
-            <li className="flex gap-2"><span className="text-brand-400 font-bold flex-shrink-0">3.</span>Open the file, fill in <code className="bg-slate-800 px-1 rounded">old_quantity</code> for each SKU</li>
-            <li className="flex gap-2"><span className="text-brand-400 font-bold flex-shrink-0">4.</span>Go to Stock tab → Upload CSV</li>
+            <li className="flex gap-2"><span className="text-brand-400 font-bold flex-shrink-0">3.</span>Quantities are auto-filled from the latest Zypee upload for that warehouse</li>
+            <li className="flex gap-2"><span className="text-brand-400 font-bold flex-shrink-0">4.</span>Edit quantities if needed, then go to Stock tab → Upload CSV</li>
           </ol>
         </div>
       </div>
@@ -1163,14 +1268,16 @@ export default function Zypee() {
           <h1 className="text-2xl font-bold text-slate-100">Zypee Stock</h1>
           <p className="text-sm text-slate-500 mt-1">Daily warehouse stock by city</p>
         </div>
-        <button
-          onClick={() => { setError(null); fileInputRef.current?.click() }}
-          disabled={uploadMut.isPending}
-          className="btn-primary"
-        >
-          <Upload className="w-4 h-4" />
-          {uploadMut.isPending ? 'Uploading…' : 'Upload CSV'}
-        </button>
+        {activeTab === 'stock' && (
+          <button
+            onClick={() => { setError(null); fileInputRef.current?.click() }}
+            disabled={uploadMut.isPending}
+            className="btn-primary"
+          >
+            <Upload className="w-4 h-4" />
+            {uploadMut.isPending ? 'Uploading…' : 'Upload CSV'}
+          </button>
+        )}
         <input
           ref={fileInputRef}
           type="file"

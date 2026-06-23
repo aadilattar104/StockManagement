@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   getMappings, createMapping, deleteMapping,
-  getStock, getZypeeUploads,
+  getStock, getZypeeUploads, getZypeeStock,
 } from '../api/client'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { Link2, Trash2, Plus, Search, AlertTriangle, CheckCircle2, ArrowRight, X } from 'lucide-react'
@@ -185,32 +185,36 @@ export default function SkuNormalization() {
     queryFn: getZypeeUploads,
   })
 
-  // We'll derive unmapped zypee names from what user uploads — we just store names from mappings
-  // For the quick-pick list, we need the actual zypee SKU names from uploads
-  // We'll use a separate endpoint approach: get from mappings + let user type freely
-  // The unmapped names shown in CreateMappingPanel come from a separate fetch below
+  // Collect all unique Zypee SKU names from the latest upload per warehouse.
+  // Uses the same VITE_API_URL env var that client.js uses so it works on production (Render).
   const { data: allZypeeNames = [] } = useQuery({
-    queryKey: ['zypee-all-sku-names'],
+    queryKey: ['zypee-all-sku-names', uploads.map(u => u.warehouse + ':' + u.stock_date).join(',')],
     queryFn: async () => {
-      // Fetch latest upload per warehouse and collect all unique SKU names
-      const WAREHOUSES = ['MUM', 'PUN', 'DEL', 'BLR']
+      // Determine latest upload per warehouse
       const byWh = {}
       for (const u of uploads) {
         if (!byWh[u.warehouse] || u.stock_date > byWh[u.warehouse].stock_date) {
           byWh[u.warehouse] = u
         }
       }
+      // Use the same API base that client.js uses via VITE_API_URL.
+      // On localhost Vite proxies empty-string base; on Render VITE_API_URL is set.
+      // Use getZypeeStock from client.js — it already has the correct base URL for prod/dev
       const names = new Set()
       await Promise.all(
         Object.values(byWh).map(async upload => {
-          const res = await fetch(`/api/zypee/stock?warehouse=${upload.warehouse}&date=${upload.stock_date}`)
-          const rows = await res.json()
-          for (const r of rows) { if (r.name) names.add(r.name) }
+          try {
+            const rows = await getZypeeStock(upload.warehouse, upload.stock_date)
+            for (const r of (Array.isArray(rows) ? rows : [])) { if (r.name) names.add(r.name) }
+          } catch (_) {
+            // ignore individual warehouse failures — others still populate the list
+          }
         })
       )
       return [...names].sort()
     },
     enabled: uploads.length > 0,
+    staleTime: 60_000,
   })
 
   const deleteMut = useMutation({

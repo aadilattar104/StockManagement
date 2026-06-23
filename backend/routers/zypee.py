@@ -289,6 +289,8 @@ async def upload_zypee(file: UploadFile = File(...)):
         os.unlink(tmp_path)
     if not rows:
         raise HTTPException(400, "No data rows found in CSV")
+
+    # Check if this warehouse + date already exists
     existing = (
         supabase.table("zypee_uploads")
         .select("id")
@@ -296,8 +298,49 @@ async def upload_zypee(file: UploadFile = File(...)):
         .eq("stock_date", stock_date)
         .execute()
     )
+
     if existing.data:
         upload_id = existing.data[0]["id"]
+
+        # Fetch existing stock rows to compare qty
+        existing_stock = (
+            supabase.table("zypee_stock")
+            .select("name,old_quantity")
+            .eq("upload_id", upload_id)
+            .execute()
+        )
+        existing_map = {
+            r["name"].strip().lower(): r["old_quantity"]
+            for r in (existing_stock.data or [])
+        }
+        new_map = {r["name"].strip().lower(): r["old_quantity"] for r in rows}
+
+        # Find SKUs whose qty changed
+        changed_skus = []
+        for r in rows:
+            key = r["name"].strip().lower()
+            old_qty = existing_map.get(key)
+            new_qty = r["old_quantity"]
+            if old_qty is None or old_qty != new_qty:
+                changed_skus.append({
+                    "name": r["name"],
+                    "old_qty": old_qty if old_qty is not None else 0,
+                    "new_qty": new_qty,
+                })
+
+        # No qty changes at all — return warning, do NOT overwrite
+        if not changed_skus:
+            return {
+                "warehouse": warehouse,
+                "stock_date": stock_date,
+                "upload_id": upload_id,
+                "rows_loaded": 0,
+                "duplicate": True,
+                "qty_changed": False,
+                "changed_skus": [],
+            }
+
+        # Qty changed — overwrite with new data
         supabase.table("zypee_stock").delete().eq("upload_id", upload_id).execute()
         supabase.table("zypee_uploads").update({"uploaded_at": "now()"}).eq("id", upload_id).execute()
     else:
@@ -307,6 +350,8 @@ async def upload_zypee(file: UploadFile = File(...)):
             .execute()
         )
         upload_id = upload_res.data[0]["id"]
+        changed_skus = []  # new upload — all SKUs are new
+
     stock_rows = [
         {
             "upload_id": upload_id,
@@ -319,11 +364,15 @@ async def upload_zypee(file: UploadFile = File(...)):
     ]
     for i in range(0, len(stock_rows), 100):
         supabase.table("zypee_stock").insert(stock_rows[i : i + 100]).execute()
+
     return {
         "warehouse": warehouse,
         "stock_date": stock_date,
         "upload_id": upload_id,
         "rows_loaded": len(stock_rows),
+        "duplicate": len(changed_skus) > 0,  # True = was existing but qty changed
+        "qty_changed": len(changed_skus) > 0,
+        "changed_skus": changed_skus,
     }
 
 

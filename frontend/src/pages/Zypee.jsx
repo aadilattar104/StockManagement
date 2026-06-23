@@ -1226,8 +1226,15 @@ export default function Zypee() {
       qc.invalidateQueries(['zypee-uploads'])
       qc.invalidateQueries(['zypee-stock'])
       setError(null)
-      setUploadSuccess(`✓ Loaded ${data.rows_loaded} rows for ${data.warehouse} — ${fmt(data.stock_date)}`)
-      setTimeout(() => setUploadSuccess(null), 4000)
+      if (data.duplicate && !data.qty_changed) {
+        setUploadSuccess({ type: 'warn', msg: `This file has already been uploaded — ${data.warehouse} · ${fmt(data.stock_date)} · Quantities are identical, no changes made.` })
+      } else if (data.qty_changed && data.changed_skus?.length) {
+        const changes = data.changed_skus.map(s => `${s.name}: ${s.old_qty} → ${s.new_qty}`).join('  ·  ')
+        setUploadSuccess({ type: 'update', msg: `Updated ${data.rows_loaded} SKUs for ${data.warehouse} — ${fmt(data.stock_date)}`, detail: `Changed: ${changes}` })
+      } else {
+        setUploadSuccess({ type: 'new', msg: `✓ Loaded ${data.rows_loaded} rows for ${data.warehouse} — ${fmt(data.stock_date)}` })
+      }
+      setTimeout(() => setUploadSuccess(null), 8000)
     },
     onError: (e) => setError(e.message),
   })
@@ -1279,8 +1286,15 @@ export default function Zypee() {
         </div>
       )}
       {uploadSuccess && (
-        <div className="px-4 py-3 rounded-lg bg-emerald-900/30 border border-emerald-700/40 text-emerald-300 text-sm">
-          {uploadSuccess}
+        <div className={`px-4 py-3 rounded-lg text-sm space-y-0.5 ${
+          uploadSuccess.type === 'warn'
+            ? 'bg-amber-900/30 border border-amber-700/40 text-amber-300'
+            : uploadSuccess.type === 'update'
+            ? 'bg-blue-900/30 border border-blue-700/40 text-blue-300'
+            : 'bg-emerald-900/30 border border-emerald-700/40 text-emerald-300'
+        }`}>
+          <p>{uploadSuccess.msg}</p>
+          {uploadSuccess.detail && <p className="text-xs opacity-70">{uploadSuccess.detail}</p>}
         </div>
       )}
 

@@ -19,6 +19,7 @@ function CreateMappingPanel({ warehouseStock, existingMappings, zypeeSkuNames, o
   const [zypeeName, setZypeeName] = useState('')
   const [warehouseId, setWarehouseId] = useState('')
   const [stockSearch, setStockSearch] = useState('')
+  const [zypeeSearch, setZypeeSearch] = useState('')
   const [error, setError] = useState(null)
 
   const alreadyMapped = new Set(existingMappings.map(m => m.zypee_sku_name))
@@ -53,6 +54,12 @@ function CreateMappingPanel({ warehouseStock, existingMappings, zypeeSkuNames, o
 
   const unmappedZypeeNames = zypeeSkuNames.filter(n => !alreadyMapped.has(n))
 
+  const filteredZypeeNames = useMemo(() => {
+    if (!zypeeSearch.trim()) return unmappedZypeeNames
+    const s = zypeeSearch.toLowerCase()
+    return unmappedZypeeNames.filter(n => n.toLowerCase().includes(s))
+  }, [unmappedZypeeNames, zypeeSearch])
+
   return (
     <div className="card p-5 space-y-5">
       <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
@@ -63,21 +70,22 @@ function CreateMappingPanel({ warehouseStock, existingMappings, zypeeSkuNames, o
       {/* Zypee SKU */}
       <div>
         <label className="block text-xs text-slate-500 mb-1.5">Zypee SKU Name</label>
-        <input
-          type="text"
-          value={zypeeName}
-          onChange={e => setZypeeName(e.target.value)}
-          placeholder="Type or select from list below…"
-          className="w-full bg-slate-800 border border-slate-700 text-slate-200 text-sm rounded px-3 py-2 focus:outline-none focus:border-brand-500 placeholder-slate-600"
-        />
-        {/* Quick-pick from unmapped Zypee names found in uploads */}
-        {unmappedZypeeNames.length > 0 && (
-          <div className="mt-2 max-h-32 overflow-y-auto space-y-0.5">
-            <p className="text-xs text-slate-600 mb-1">Unmapped from uploads — click to fill:</p>
-            {unmappedZypeeNames.map(name => (
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+          <input
+            type="text"
+            value={zypeeSearch || zypeeName}
+            onChange={e => { setZypeeSearch(e.target.value); setZypeeName(e.target.value) }}
+            placeholder="Search or type Zypee SKU name…"
+            className="w-full bg-slate-800 border border-slate-700 text-slate-200 text-sm rounded pl-8 pr-3 py-2 focus:outline-none focus:border-brand-500 placeholder-slate-600"
+          />
+        </div>
+        {unmappedZypeeNames.length > 0 && filteredZypeeNames.length > 0 && (
+          <div className="mt-1.5 max-h-36 overflow-y-auto space-y-0.5 border border-slate-700/50 rounded">
+            {filteredZypeeNames.map(name => (
               <button
                 key={name}
-                onClick={() => setZypeeName(name)}
+                onClick={() => { setZypeeName(name); setZypeeSearch('') }}
                 className={`w-full text-left text-xs px-2 py-1.5 rounded transition-colors flex items-center gap-2 ${
                   zypeeName === name
                     ? 'bg-brand-700/30 text-brand-300 border border-brand-700/50'

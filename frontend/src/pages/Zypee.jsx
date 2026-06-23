@@ -939,6 +939,15 @@ function SkuMasterTab() {
 
   const stockByWarehouse = { MUM: mumStock, PUN: punStock, DEL: delStock, BLR: blrStock }
 
+  // All unique Zypee SKU names from latest uploads across all warehouses
+  const allZypeeSkuNames = useMemo(() => {
+    const names = new Set()
+    for (const rows of Object.values(stockByWarehouse)) {
+      for (const r of rows) { if (r.name) names.add(r.name) }
+    }
+    return [...names].sort()
+  }, [mumStock, punStock, delStock, blrStock])
+
   function toggleSku(sku) {
     setSelectedSkus(prev => {
       const next = new Set(prev)
@@ -1000,7 +1009,7 @@ function SkuMasterTab() {
   }
 
   function generateCsv() {
-    const toDownload = skus.filter(s => selectedSkus.has(s))
+    const toDownload = skus
     if (!toDownload.length) return
 
     // Build name→qty from latest Zypee stock for selected warehouse
@@ -1035,20 +1044,9 @@ function SkuMasterTab() {
       <div className="xl:col-span-3 card overflow-hidden flex flex-col">
         <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={skus.length > 0 && selectedSkus.size === skus.length}
-              ref={el => { if (el) el.indeterminate = selectedSkus.size > 0 && selectedSkus.size < skus.length }}
-              onChange={toggleAll}
-              className="w-3.5 h-3.5 accent-brand-500 cursor-pointer"
-              title="Select / deselect all"
-            />
             <BookOpen className="w-4 h-4 text-slate-500" />
             <h2 className="text-sm font-semibold text-slate-200">SKU Master List</h2>
             <span className="ml-1 text-xs text-slate-600 bg-slate-800 px-2 py-0.5 rounded-full">{skus.length}</span>
-            {selectedSkus.size > 0 && selectedSkus.size < skus.length && (
-              <span className="text-xs text-brand-400">{selectedSkus.size} selected</span>
-            )}
           </div>
           <button
             onClick={resetToDefault}
@@ -1058,24 +1056,6 @@ function SkuMasterTab() {
           </button>
         </div>
 
-        {/* Add new SKU */}
-        <div className="px-4 py-3 border-b border-slate-800 flex gap-2">
-          <input
-            type="text"
-            value={newSku}
-            onChange={e => setNewSku(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && addSku()}
-            placeholder="Type SKU name and press Enter…"
-            className="flex-1 bg-slate-800 border border-slate-700 text-slate-200 text-sm rounded px-3 py-1.5 focus:outline-none focus:border-brand-500 placeholder-slate-600"
-          />
-          <button
-            onClick={addSku}
-            disabled={!newSku.trim()}
-            className="btn-primary disabled:opacity-40 disabled:cursor-not-allowed px-3"
-          >
-            <Plus className="w-4 h-4" />
-          </button>
-        </div>
 
         {/* SKU list */}
         <div className="flex-1 overflow-y-auto max-h-[520px] divide-y divide-slate-800/40">
@@ -1095,14 +1075,7 @@ function SkuMasterTab() {
               }`}
             >
               <GripVertical className="w-3.5 h-3.5 text-slate-700 group-hover:text-slate-500 flex-shrink-0" />
-              <input
-                type="checkbox"
-                checked={selectedSkus.has(sku)}
-                onChange={() => toggleSku(sku)}
-                onClick={e => e.stopPropagation()}
-                className="w-3.5 h-3.5 accent-brand-500 cursor-pointer flex-shrink-0"
-              />
-              <span className="text-xs text-slate-500 w-5 flex-shrink-0 font-mono">{i + 1}</span>
+<span className="text-xs text-slate-500 w-5 flex-shrink-0 font-mono">{i + 1}</span>
 
               {editIdx === i ? (
                 <input
@@ -1137,25 +1110,51 @@ function SkuMasterTab() {
           ))}
         </div>
 
-        <div className="px-4 py-2 border-t border-slate-800">
-          <p className="text-xs text-slate-600">Drag to reorder · Double-click to edit · Hover to delete</p>
-        </div>
+
       </div>
 
-      {/* Right: Generate CSV panel */}
+      {/* Right: Not in master + Generate CSV */}
       <div className="xl:col-span-2 space-y-4">
-        <div className="card p-5 space-y-5">
-          <div>
-            <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-              <FileDown className="w-4 h-4 text-slate-400" />
-              Generate Upload CSV
-            </h3>
-            <p className="text-xs text-slate-500 mt-1">
-              Creates a pre-filled CSV with all {skus.length} SKUs at qty 0.
-              Fill in quantities, then upload.
-            </p>
+        {/* Not in master — half height */}
+        <div className="card overflow-hidden flex flex-col">
+          <div className="px-4 py-3 border-b border-slate-800 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-500" />
+            <h3 className="text-sm font-semibold text-slate-200">Not in Master List</h3>
+            <span className="ml-1 text-xs text-slate-600 bg-slate-800 px-2 py-0.5 rounded-full">
+              {allZypeeSkuNames.filter(n => !skus.includes(n)).length}
+            </span>
           </div>
+          <div className="overflow-y-auto max-h-[240px] divide-y divide-slate-800/40">
+            {allZypeeSkuNames.length === 0 && (
+              <p className="px-4 py-6 text-xs text-slate-500 text-center">
+                No Zypee uploads found. Upload a CSV in the Stock tab first.
+              </p>
+            )}
+            {allZypeeSkuNames.filter(n => !skus.includes(n)).length === 0 && allZypeeSkuNames.length > 0 && (
+              <p className="px-4 py-6 text-xs text-slate-500 text-center">
+                All Zypee SKUs are already in the master list.
+              </p>
+            )}
+            {allZypeeSkuNames.filter(n => !skus.includes(n)).map(name => (
+              <div key={name} className="flex items-center justify-between gap-3 px-3 py-2 hover:bg-slate-800/30 transition-colors">
+                <span className="text-xs text-slate-300 flex-1">{name}</span>
+                <button
+                  onClick={() => persist([...skus, name])}
+                  className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-brand-700/50 bg-brand-900/20 text-brand-400 hover:bg-brand-900/40 transition-colors flex-shrink-0"
+                >
+                  <Plus className="w-3 h-3" /> Add
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
 
+        {/* Generate CSV */}
+        <div className="card p-5 space-y-4">
+          <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+            <FileDown className="w-4 h-4 text-slate-400" />
+            Generate Upload CSV
+          </h3>
           <div className="space-y-3">
             <div>
               <label className="block text-xs text-slate-500 mb-1.5">Warehouse</label>
@@ -1175,7 +1174,6 @@ function SkuMasterTab() {
                 ))}
               </div>
             </div>
-
             <div>
               <label className="block text-xs text-slate-500 mb-1.5">Date</label>
               <input
@@ -1186,39 +1184,22 @@ function SkuMasterTab() {
               />
             </div>
           </div>
-
-          {/* Preview filename */}
           {genDate && (
             <div className="bg-slate-800/60 rounded-lg px-3 py-2.5 border border-slate-700/50">
               <p className="text-xs text-slate-500 mb-0.5">Output filename</p>
               <p className="text-sm font-mono text-slate-200">
-                {(() => {
-                  const [y, m, d] = genDate.split('-')
-                  return `${genWarehouse}_${d}-${m}-${y}.csv`
-                })()}
+                {(() => { const [y, m, d] = genDate.split('-'); return `${genWarehouse}_${d}-${m}-${y}.csv` })()}
               </p>
             </div>
           )}
-
           <button
             onClick={generateCsv}
-            disabled={!selectedSkus.size || !genDate}
+            disabled={!skus.length || !genDate}
             className="w-full btn-primary justify-center disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Download className="w-4 h-4" />
-            Download CSV ({selectedSkus.size} / {skus.length} SKUs)
+            Download CSV ({skus.length} SKUs)
           </button>
-        </div>
-
-        {/* Instructions card */}
-        <div className="card p-4 space-y-2.5">
-          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">How to use</p>
-          <ol className="space-y-2 text-xs text-slate-500">
-            <li className="flex gap-2"><span className="text-brand-400 font-bold flex-shrink-0">1.</span>Manage your SKU list on the left (add / remove / reorder)</li>
-            <li className="flex gap-2"><span className="text-brand-400 font-bold flex-shrink-0">2.</span>Pick warehouse + date, click Download CSV</li>
-            <li className="flex gap-2"><span className="text-brand-400 font-bold flex-shrink-0">3.</span>Quantities are auto-filled from the latest Zypee upload for that warehouse</li>
-            <li className="flex gap-2"><span className="text-brand-400 font-bold flex-shrink-0">4.</span>Edit quantities if needed, then go to Stock tab → Upload CSV</li>
-          </ol>
         </div>
       </div>
     </div>

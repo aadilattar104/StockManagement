@@ -17,7 +17,7 @@ app = FastAPI(title="Warehouse Fulfilment System")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://stockmanagement-nu.vercel.app"],
+    allow_origins=["http://localhost:5173", "https://stockmanagement-nu.vercel.app", "https://stockmanagement-1-nr7n.onrender.com"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -27,12 +27,12 @@ app.add_middleware(
 async def add_cors_headers(request: Request, call_next):
     if request.method == "OPTIONS":
         response = Response()
-        response.headers["Access-Control-Allow-Origin"] = "https://stockmanagement-nu.vercel.app"
+        response.headers["Access-Control-Allow-Origin"] = request.headers.get("origin", "https://stockmanagement-1-nr7n.onrender.com")
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "*"
         return response
     response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "https://stockmanagement-nu.vercel.app"
+    response.headers["Access-Control-Allow-Origin"] = request.headers.get("origin", "https://stockmanagement-1-nr7n.onrender.com")
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "*"
     return response

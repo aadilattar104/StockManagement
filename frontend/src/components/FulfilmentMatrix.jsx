@@ -227,7 +227,7 @@ export default function FulfilmentMatrix() {
                   key={col.so_id}
                   className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap border-r border-slate-700/50 min-w-[130px]"
                 >
-                  <div className="font-semibold text-slate-200 normal-case truncate max-w-[120px]">
+                  <div className="font-semibold text-slate-200 normal-case whitespace-normal break-words max-w-[160px] mx-auto">
                     {col.vendor_name}
                   </div>
                   <div className="font-mono text-slate-500 font-normal mt-0.5">

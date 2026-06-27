@@ -5,10 +5,31 @@ from typing import Optional
 
 MATCH_THRESHOLD = int(os.getenv("MATCH_THRESHOLD", "40"))
 
+# Only true stop words — brand/product words kept for matching
 NOISE_WORDS = {
-    "i", "the", "svasthyaa", "gms", "high", "protein",
-    "fiber", "fibre", "mix", "wheat", "worlds", "world",
-    "best", "khapli", "or", "by", "of", "a", "an"
+    # Pure stop words — no semantic value
+    "i", "the", "by", "of", "a", "an", "or",
+    # Brand noise
+    "svasthyaa",
+    # Unit noise
+    "gms", "gm",
+}
+
+# Synonym map — normalise alternate spellings to a canonical form
+SYNONYMS = {
+    "fiber"  : "fibre",   # High Fiber → High Fibre
+    "world"  : "worlds",  # World's → Worlds
+    "chana"  : "chana",
+    "jor"    : "jor",
+    "moong"  : "moong",
+    "millet" : "millet",
+    "khakhra": "khakhra",
+    "khakra" : "khakhra",
+    "protein": "protein",
+    "high"   : "high",
+    "mix"    : "mix",
+    "wheat"  : "wheat",
+    "khapli" : "khapli",
 }
 
 
@@ -16,8 +37,17 @@ def normalize_text(text: str) -> str:
     if not text:
         return ""
     text = text.lower()
+    # Replace separators (|, -, /) with space
+    text = re.sub(r"[|/\\-]", " ", text)
+    # Remove remaining non-alphanumeric except space
     text = re.sub(r"[^a-z0-9\s]", " ", text)
-    tokens = [t for t in text.split() if t not in NOISE_WORDS]
+    tokens = []
+    for t in text.split():
+        if t in NOISE_WORDS:
+            continue
+        # Apply synonym normalisation
+        t = SYNONYMS.get(t, t)
+        tokens.append(t)
     return " ".join(tokens)
 
 
@@ -72,7 +102,7 @@ def find_best_stock_match(product_name: str, gramage: str, stock_rows: list) -> 
     for row in stock_rows:
         score = match_score(product_name, row.get("title", ""))
 
-        # gramage filter — strict ±15g when both sides have a gramage
+        # gramage filter — strict ±4g when both sides have a gramage
         if product_grams is not None:
             stock_grams = extract_grams(str(row.get("weight", "")))
             if stock_grams is not None:
@@ -91,9 +121,6 @@ def find_best_stock_match(product_name: str, gramage: str, stock_rows: list) -> 
 def find_best_so_line_match(invoice_line: dict, so_lines: list) -> Optional[dict]:
     """
     Match an invoice line to the best SO line using both product name AND gramage.
-    Gramage tolerance is ±15g (same as stock matching) — tight enough to prevent
-    72gms invoice lines from matching 220gms SO lines.
-    Returns the best matching SO line dict, or None if no good match found.
     """
     inv_name = invoice_line.get("product_name", "")
     inv_grams = extract_grams(str(invoice_line.get("gramage", "") or ""))
@@ -102,12 +129,11 @@ def find_best_so_line_match(invoice_line: dict, so_lines: list) -> Optional[dict
     best_score = 0.0
 
     for sol in so_lines:
-        # Text score
         text_score = match_score(inv_name, sol.get("product_name", ""))
         if text_score < MATCH_THRESHOLD:
             continue
 
-        # Gramage check — strict ±15g when both sides have gramage
+        # Gramage check — strict ±4g when both sides have gramage
         if inv_grams is not None:
             sol_grams = extract_grams(str(sol.get("gramage", "") or ""))
             if sol_grams is not None and abs(inv_grams - sol_grams) > 4:
@@ -123,7 +149,6 @@ def find_best_so_line_match(invoice_line: dict, so_lines: list) -> Optional[dict
 def fuzzy_vendor_match(vendor_name: str, so_list: list, threshold: float = 70.0) -> list:
     """
     Returns list of SO dicts from so_list where vendor fuzzy-matches.
-    so_list: list of dicts with vendor_name key.
     """
     matched = []
     for so in so_list:
@@ -134,3 +159,21 @@ def fuzzy_vendor_match(vendor_name: str, so_list: list, threshold: float = 70.0)
         if score >= threshold:
             matched.append(so)
     return matched
+
+
+# ── Quick sanity test ────────────────────────────────────────
+if __name__ == "__main__":
+    tests = [
+        ("Worlds Best Chana Jor | Svasthyaa |", "Worlds Best Chana Jor",   "35gms", "35 g"),
+        ("World's Best Chana Jor I Svasthyaa",  "Worlds Best Chana Jor",   "72 gms","72 g"),
+        ("High Fibre Millet Mix | Svasthyaa",   "High Fibre Millet Mix",   "35 gms","35 g"),
+        ("High Fiber Millet Mix I Svasthyaa",   "High Fibre Millet Mix",   "72 gms","72 g"),
+    ]
+    print(f"{'Product Name':<45} {'Stock Title':<30} Score")
+    print("-" * 90)
+    for pname, stitle, pgram, sgram in tests:
+        score = match_score(pname, stitle)
+        pg    = extract_grams(pgram)
+        sg    = extract_grams(sgram)
+        gram_ok = abs(pg - sg) <= 4 if pg and sg else "N/A"
+        print(f"{pname:<45} {stitle:<30} {score:.1f}  gram_ok={gram_ok}")

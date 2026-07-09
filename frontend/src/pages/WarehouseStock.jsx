@@ -7,7 +7,7 @@ import {
 import StatusBadge from '../components/StatusBadge'
 import UploadZone from '../components/UploadZone'
 import ConfirmDialog from '../components/ConfirmDialog'
-import { Pencil, Trash2, Check, X, Upload, RefreshCw, ArrowUp, ArrowDown, Plus } from 'lucide-react'
+import { Pencil, Trash2, Check, X, Upload, RefreshCw, Plus } from 'lucide-react'
 
 export default function WarehouseStock() {
   const qc = useQueryClient()
@@ -158,12 +158,23 @@ export default function WarehouseStock() {
     }
   }
 
-  function moveProduct(index, direction) {
+  const [posEditId, setPosEditId] = useState(null)
+  const [posEditVal, setPosEditVal] = useState('')
+
+  function setProductPosition(id, newPosition) {
+    const from = productMaster.findIndex(p => p.id === id)
+    if (from === -1) return
+
+    // Clamp the typed 1-based position into range, then move the item there.
+    const to = Math.min(Math.max(newPosition - 1, 0), productMaster.length - 1)
+    if (to === from) { setPosEditId(null); return }
+
     const next = [...productMaster]
-    const target = index + direction
-    if (target < 0 || target >= next.length) return
-    ;[next[index], next[target]] = [next[target], next[index]]
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved)
+
     reorderMut.mutate(next.map(p => p.id))
+    setPosEditId(null)
   }
 
   return (
@@ -358,17 +369,31 @@ export default function WarehouseStock() {
                   {productMaster.map((p, idx) => (
                     <tr key={p.id} className="transition-colors hover:bg-slate-800/30">
                       <td className="table-cell">
-                        <div className="flex items-center gap-1">
-                          <button onClick={() => moveProduct(idx, -1)} disabled={idx === 0 || reorderMut.isPending}
-                            className="p-1 hover:bg-slate-700 rounded text-slate-400 disabled:opacity-30 disabled:hover:bg-transparent">
-                            <ArrowUp className="w-3.5 h-3.5" />
+                        {posEditId === p.id ? (
+                          <input
+                            type="number"
+                            min={1}
+                            max={productMaster.length}
+                            value={posEditVal}
+                            onChange={e => setPosEditVal(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') setProductPosition(p.id, parseInt(posEditVal))
+                              if (e.key === 'Escape') setPosEditId(null)
+                            }}
+                            onBlur={() => setProductPosition(p.id, parseInt(posEditVal))}
+                            className="input w-16 text-center"
+                            autoFocus
+                          />
+                        ) : (
+                          <button
+                            onClick={() => { setPosEditId(p.id); setPosEditVal(String(idx + 1)) }}
+                            disabled={reorderMut.isPending}
+                            className="text-xs text-slate-400 hover:text-slate-200 font-mono w-8 h-7 rounded hover:bg-slate-700 transition-colors"
+                            title="Click to enter a new position"
+                          >
+                            {idx + 1}
                           </button>
-                          <button onClick={() => moveProduct(idx, 1)} disabled={idx === productMaster.length - 1 || reorderMut.isPending}
-                            className="p-1 hover:bg-slate-700 rounded text-slate-400 disabled:opacity-30 disabled:hover:bg-transparent">
-                            <ArrowDown className="w-3.5 h-3.5" />
-                          </button>
-                          <span className="text-xs text-slate-500 font-mono ml-1">{idx + 1}</span>
-                        </div>
+                        )}
                       </td>
                       <td className="table-cell font-medium text-slate-200">
                         {pmEditId === p.id ? (
@@ -491,8 +516,8 @@ export default function WarehouseStock() {
         onClose={() => setPmDeleteTarget(null)}
         onConfirm={() => deletePmMut.mutate(pmDeleteTarget.id)}
         title="Delete Product?"
-        message={`Remove "${pmDeleteTarget?.sku_name}" (${pmDeleteTarget?.weight || 'no weight'}) from the Product Master? This removes it everywhere — Stock, Fulfilment Matrix, and Dashboard.`}
-        warning="This cannot be undone."
+        message={`Remove "${pmDeleteTarget?.sku_name}" (${pmDeleteTarget?.weight || 'no weight'}) from the Product Master? It will disappear from Stock, Fulfilment Matrix, and Dashboard, but its warehouse stock data is kept — it will reappear under "New Products Detected" if you want to add it back.`}
+        warning="You can re-add it anytime from New Products Detected."
         loading={deletePmMut.isPending}
       />
     </div>

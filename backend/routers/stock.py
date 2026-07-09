@@ -339,22 +339,21 @@ async def edit_product_master(product_id: str, body: ProductMasterEditRequest):
 @router.delete("/product-master/{product_id}")
 async def delete_product_master(product_id: str):
     """
-    Removes a product from the catalogue entirely: the Product Master entry
-    and its underlying warehouse_stock row (with FK references nullified
-    first, same as the existing Delete Stock behaviour).
+    Removes a product from the Product Master catalogue only. The underlying
+    warehouse_stock row (and its FK references to SO/invoice line items) is
+    left untouched — it simply falls out of the Product Master, which means
+    it will reappear under "New Products Detected" until re-approved.
+
+    Use DELETE /stock/{stock_id} (Stock tab) instead if the intent is to
+    permanently remove the SKU everywhere.
     """
-    pm_res = supabase.table("product_master").select("warehouse_stock_id").eq(
+    pm_res = supabase.table("product_master").select("id").eq(
         "id", product_id
     ).execute()
     if not pm_res.data:
         raise HTTPException(404, "Product not found")
-    stock_id = pm_res.data[0].get("warehouse_stock_id")
 
     supabase.table("product_master").delete().eq("id", product_id).execute()
-
-    if stock_id:
-        _nullify_stock_references([stock_id])
-        supabase.table("warehouse_stock").delete().eq("id", stock_id).execute()
 
     return {"deleted": product_id}
 

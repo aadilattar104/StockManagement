@@ -1,14 +1,23 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getStock, uploadStock, updateStockFromXlsx, updateStock, deleteStock, toggleSkuActive, deleteAllStock, deleteSelectedStock } from '../api/client'
+import {
+  getStock, uploadStock, updateStockFromXlsx, updateStock, deleteStock, deleteAllStock, deleteSelectedStock,
+  getProductMaster, getNewProducts, approveProduct, editProductMaster, deleteProductMaster, reorderProductMaster,
+} from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import UploadZone from '../components/UploadZone'
 import ConfirmDialog from '../components/ConfirmDialog'
-import { Pencil, Trash2, Check, X, Upload, RefreshCw } from 'lucide-react'
+import { Pencil, Trash2, Check, X, Upload, RefreshCw, ArrowUp, ArrowDown, Plus } from 'lucide-react'
 
 export default function WarehouseStock() {
   const qc = useQueryClient()
   const { data: rows = [], isLoading } = useQuery({ queryKey: ['stock'], queryFn: getStock })
+  const { data: productMaster = [], isLoading: pmLoading } = useQuery({
+    queryKey: ['product-master'], queryFn: getProductMaster,
+  })
+  const { data: newProducts = [], isLoading: newLoading } = useQuery({
+    queryKey: ['new-products'], queryFn: getNewProducts,
+  })
 
   const [tab, setTab] = useState('stock')
   const [editId, setEditId] = useState(null)
@@ -22,28 +31,32 @@ export default function WarehouseStock() {
   const [updateMsg, setUpdateMsg] = useState(null)
   const [showUpdate, setShowUpdate] = useState(false)
 
+  // Product Master row editing
+  const [pmEditId, setPmEditId] = useState(null)
+  const [pmEditName, setPmEditName] = useState('')
+  const [pmEditWeight, setPmEditWeight] = useState('')
+  const [pmDeleteTarget, setPmDeleteTarget] = useState(null)
+
   const uploadMut = useMutation({
     mutationFn: uploadStock,
     onSuccess: (data) => {
       qc.invalidateQueries(['stock'])
+      qc.invalidateQueries(['new-products'])
       setUploadMsg(data.message)
       setShowUpload(false)
       setTimeout(() => setUploadMsg(null), 4000)
     }
   })
 
-  const updateMut = useMutation({
-    mutationFn: ({ id, qty }) => updateStock(id, qty),
-    onSuccess: () => { qc.invalidateQueries(['stock']); setEditId(null) }
-  })
-
   const updateStockMut = useMutation({
     mutationFn: updateStockFromXlsx,
     onSuccess: (data) => {
-      // Existing warehouse_stock IDs never change on this endpoint, so
-      // invalidating these caches is enough to refresh everything downstream
-      // (Fulfilment Matrix, Zypee compare, etc.) without any remapping.
+      // Product Master IDs never change on this endpoint, so invalidating
+      // these caches refreshes everything downstream (Fulfilment Matrix,
+      // Dashboard Warehouse Stock Matrix, etc.) with zero remapping.
       qc.invalidateQueries(['stock'])
+      qc.invalidateQueries(['product-master'])
+      qc.invalidateQueries(['new-products'])
       qc.invalidateQueries(['fulfilment-matrix'])
       setUpdateMsg(data.message)
       setShowUpdate(false)
@@ -51,15 +64,30 @@ export default function WarehouseStock() {
     }
   })
 
+  const updateMut = useMutation({
+    mutationFn: ({ id, qty }) => updateStock(id, qty),
+    onSuccess: () => {
+      qc.invalidateQueries(['stock'])
+      qc.invalidateQueries(['product-master'])
+      setEditId(null)
+    }
+  })
+
   const deleteMut = useMutation({
     mutationFn: deleteStock,
-    onSuccess: () => { qc.invalidateQueries(['stock']); setDeleteTarget(null) }
+    onSuccess: () => {
+      qc.invalidateQueries(['stock'])
+      qc.invalidateQueries(['product-master'])
+      setDeleteTarget(null)
+    }
   })
 
   const deleteAllMut = useMutation({
     mutationFn: deleteAllStock,
     onSuccess: () => {
       qc.invalidateQueries(['stock'])
+      qc.invalidateQueries(['product-master'])
+      qc.invalidateQueries(['new-products'])
       setShowDeleteAll(false)
       setSelectedIds(new Set())
     }
@@ -69,26 +97,49 @@ export default function WarehouseStock() {
     mutationFn: () => deleteSelectedStock([...selectedIds]),
     onSuccess: () => {
       qc.invalidateQueries(['stock'])
+      qc.invalidateQueries(['product-master'])
       setShowDeleteSelected(false)
       setSelectedIds(new Set())
     }
   })
 
-  const toggleMut = useMutation({
-    mutationFn: ({ id, is_active }) => toggleSkuActive(id, is_active),
-    onSuccess: () => qc.invalidateQueries(['stock']),
+  const approveMut = useMutation({
+    mutationFn: approveProduct,
+    onSuccess: () => {
+      qc.invalidateQueries(['product-master'])
+      qc.invalidateQueries(['new-products'])
+      qc.invalidateQueries(['stock'])
+    }
   })
 
-  const statusOrder = { out: 0, low: 1, healthy: 2 }
-  const activeRows = [...rows]
-    .filter(r => r.is_active)
-    .sort((a, b) => statusOrder[a.status] - statusOrder[b.status])
+  const editPmMut = useMutation({
+    mutationFn: ({ id, payload }) => editProductMaster(id, payload),
+    onSuccess: () => {
+      qc.invalidateQueries(['product-master'])
+      qc.invalidateQueries(['stock'])
+      setPmEditId(null)
+    }
+  })
 
-  const zeroQtyRows = [...rows]
-    .filter(r => r.stock_qty === 0)
-    .sort((a, b) => a.title.localeCompare(b.title))
+  const deletePmMut = useMutation({
+    mutationFn: deleteProductMaster,
+    onSuccess: () => {
+      qc.invalidateQueries(['product-master'])
+      qc.invalidateQueries(['stock'])
+      qc.invalidateQueries(['new-products'])
+      setPmDeleteTarget(null)
+    }
+  })
 
-  const allSelected = activeRows.length > 0 && activeRows.every(r => selectedIds.has(r.id))
+  const reorderMut = useMutation({
+    mutationFn: reorderProductMaster,
+    onSuccess: () => {
+      qc.invalidateQueries(['product-master'])
+      qc.invalidateQueries(['stock'])
+    }
+  })
+
+  const allSelected = rows.length > 0 && rows.every(r => selectedIds.has(r.id))
   const someSelected = selectedIds.size > 0
 
   function toggleRow(id) {
@@ -103,8 +154,16 @@ export default function WarehouseStock() {
     if (allSelected) {
       setSelectedIds(new Set())
     } else {
-      setSelectedIds(new Set(activeRows.map(r => r.id)))
+      setSelectedIds(new Set(rows.map(r => r.id)))
     }
+  }
+
+  function moveProduct(index, direction) {
+    const next = [...productMaster]
+    const target = index + direction
+    if (target < 0 || target >= next.length) return
+    ;[next[index], next[target]] = [next[target], next[index]]
+    reorderMut.mutate(next.map(p => p.id))
   }
 
   return (
@@ -113,7 +172,8 @@ export default function WarehouseStock() {
         <div>
           <h1 className="text-2xl font-bold text-slate-100">Warehouse Stock</h1>
           <p className="text-sm text-slate-500 mt-1">
-            {activeRows.length} active SKUs · {rows.length} total
+            {rows.length} SKUs in Product Master
+            {newProducts.length > 0 && <> · {newProducts.length} new product{newProducts.length > 1 ? 's' : ''} detected</>}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -149,8 +209,9 @@ export default function WarehouseStock() {
         <div className="card p-5">
           <p className="text-xs text-slate-500 mb-3">
             Upload the latest warehouse stock XLSX. Existing SKUs are matched by product + weight and
-            updated in place — IDs, Zypee mappings, Sales Orders, and Invoices stay intact. SKUs missing
-            from this file are kept but set to 0 qty (never deleted).
+            updated in place — IDs, Product Master entries, Sales Orders, and Invoices stay intact. SKUs
+            missing from this file are kept but set to 0 qty (never deleted). New SKUs appear under
+            "New Products Detected" in the Product Master tab.
           </p>
           <UploadZone accept=".xlsx" label="Update warehouse stock XLSX"
             onFile={(f) => updateStockMut.mutate(f)} loading={updateStockMut.isPending} />
@@ -176,14 +237,14 @@ export default function WarehouseStock() {
           }`}>
           Stock
         </button>
-        <button onClick={() => { setTab('manage'); setSelectedIds(new Set()) }}
+        <button onClick={() => { setTab('product-master'); setSelectedIds(new Set()) }}
           className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-            tab === 'manage' ? 'border-brand-500 text-brand-400' : 'border-transparent text-slate-500 hover:text-slate-300'
+            tab === 'product-master' ? 'border-brand-500 text-brand-400' : 'border-transparent text-slate-500 hover:text-slate-300'
           }`}>
-          Manage SKUs
-          {zeroQtyRows.length > 0 && (
-            <span className="ml-2 text-xs bg-slate-700 text-slate-400 px-1.5 py-0.5 rounded-full">
-              {zeroQtyRows.length}
+          Product Master
+          {newProducts.length > 0 && (
+            <span className="ml-2 text-xs bg-amber-900/40 text-amber-400 px-1.5 py-0.5 rounded-full">
+              {newProducts.length} new
             </span>
           )}
         </button>
@@ -207,12 +268,13 @@ export default function WarehouseStock() {
             </thead>
             <tbody className="divide-y divide-slate-800/60">
               {isLoading && <tr><td colSpan={6} className="text-center py-12 text-slate-500 text-sm">Loading…</td></tr>}
-              {!isLoading && activeRows.length === 0 && (
+              {!isLoading && rows.length === 0 && (
                 <tr><td colSpan={6} className="text-center py-12 text-slate-500 text-sm">
-                  No active stock. Upload an XLSX to get started.
+                  No SKUs in the Product Master yet. Upload an XLSX, then approve products in the
+                  Product Master tab to get started.
                 </td></tr>
               )}
-              {activeRows.map(row => {
+              {rows.map(row => {
                 const isSelected = selectedIds.has(row.id)
                 const rowBg = isSelected ? 'bg-brand-900/20' :
                   row.status === 'out' ? 'bg-red-950/20' :
@@ -268,51 +330,129 @@ export default function WarehouseStock() {
         </div>
       )}
 
-      {tab === 'manage' && (
-        <div className="space-y-3">
-          <p className="text-xs text-slate-500">
-            SKUs with stock qty = 0. Toggle active/inactive manually. SKUs with qty &gt; 0 are always active automatically.
-          </p>
-          <div className="card overflow-hidden">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-slate-800">
-                  <th className="table-head px-4 py-3 text-left">Product</th>
-                  <th className="table-head px-4 py-3 text-left">Weight</th>
-                  <th className="table-head px-4 py-3 text-center">SKU Status</th>
-                  <th className="table-head px-4 py-3 text-right">Toggle</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60">
-                {isLoading && <tr><td colSpan={4} className="text-center py-12 text-slate-500 text-sm">Loading…</td></tr>}
-                {!isLoading && zeroQtyRows.length === 0 && (
-                  <tr><td colSpan={4} className="text-center py-12 text-slate-500 text-sm">
-                    All SKUs have stock qty &gt; 0. Nothing to manage here.
-                  </td></tr>
-                )}
-                {zeroQtyRows.map(row => (
-                  <tr key={row.id} className="transition-colors hover:bg-slate-800/30">
-                    <td className="table-cell font-medium text-slate-200">{row.title}</td>
-                    <td className="table-cell text-slate-400 font-mono text-xs">{row.weight || '—'}</td>
-                    <td className="table-cell text-center">
-                      <StatusBadge status={row.is_active} type="sku_active" />
-                    </td>
-                    <td className="table-cell text-right">
-                      <button
-                        onClick={() => toggleMut.mutate({ id: row.id, is_active: !row.is_active })}
-                        disabled={toggleMut.isPending}
-                        className={`text-xs px-3 py-1.5 rounded font-medium transition-colors ${
-                          row.is_active
-                            ? 'bg-red-900/30 text-red-400 hover:bg-red-900/50 border border-red-800/40'
-                            : 'bg-emerald-900/30 text-emerald-400 hover:bg-emerald-900/50 border border-emerald-800/40'
-                        }`}>
-                        {row.is_active ? 'Mark Inactive' : 'Mark Active'}
-                      </button>
-                    </td>
+      {tab === 'product-master' && (
+        <div className="space-y-6">
+          <div className="space-y-3">
+            <p className="text-xs text-slate-500">
+              The permanent product catalogue. Every screen — Stock, Fulfilment Matrix, Dashboard
+              Warehouse Stock Matrix, Excel exports — uses exactly this list, in exactly this order.
+            </p>
+            <div className="card overflow-hidden">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-slate-800">
+                    <th className="table-head px-4 py-3 text-left w-16">Order</th>
+                    <th className="table-head px-4 py-3 text-left">SKU Name</th>
+                    <th className="table-head px-4 py-3 text-left">Weight</th>
+                    <th className="table-head px-4 py-3 text-right">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {pmLoading && <tr><td colSpan={4} className="text-center py-12 text-slate-500 text-sm">Loading…</td></tr>}
+                  {!pmLoading && productMaster.length === 0 && (
+                    <tr><td colSpan={4} className="text-center py-12 text-slate-500 text-sm">
+                      No products yet. Upload a warehouse stock XLSX — new SKUs will appear below under
+                      "New Products Detected" for one-click approval.
+                    </td></tr>
+                  )}
+                  {productMaster.map((p, idx) => (
+                    <tr key={p.id} className="transition-colors hover:bg-slate-800/30">
+                      <td className="table-cell">
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => moveProduct(idx, -1)} disabled={idx === 0 || reorderMut.isPending}
+                            className="p-1 hover:bg-slate-700 rounded text-slate-400 disabled:opacity-30 disabled:hover:bg-transparent">
+                            <ArrowUp className="w-3.5 h-3.5" />
+                          </button>
+                          <button onClick={() => moveProduct(idx, 1)} disabled={idx === productMaster.length - 1 || reorderMut.isPending}
+                            className="p-1 hover:bg-slate-700 rounded text-slate-400 disabled:opacity-30 disabled:hover:bg-transparent">
+                            <ArrowDown className="w-3.5 h-3.5" />
+                          </button>
+                          <span className="text-xs text-slate-500 font-mono ml-1">{idx + 1}</span>
+                        </div>
+                      </td>
+                      <td className="table-cell font-medium text-slate-200">
+                        {pmEditId === p.id ? (
+                          <input value={pmEditName} onChange={e => setPmEditName(e.target.value)}
+                            className="input w-full" autoFocus />
+                        ) : p.sku_name}
+                      </td>
+                      <td className="table-cell text-slate-400 font-mono text-xs">
+                        {pmEditId === p.id ? (
+                          <input value={pmEditWeight} onChange={e => setPmEditWeight(e.target.value)}
+                            className="input w-24" />
+                        ) : (p.weight || '—')}
+                      </td>
+                      <td className="table-cell text-right">
+                        {pmEditId === p.id ? (
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              onClick={() => editPmMut.mutate({ id: p.id, payload: { sku_name: pmEditName, weight: pmEditWeight } })}
+                              className="p-1.5 hover:bg-brand-600/20 rounded text-brand-400">
+                              <Check className="w-3.5 h-3.5" />
+                            </button>
+                            <button onClick={() => setPmEditId(null)}
+                              className="p-1.5 hover:bg-slate-700 rounded text-slate-400">
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-end gap-1">
+                            <button onClick={() => { setPmEditId(p.id); setPmEditName(p.sku_name); setPmEditWeight(p.weight || '') }}
+                              className="p-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-slate-200 transition-colors">
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button onClick={() => setPmDeleteTarget(p)}
+                              className="p-1.5 hover:bg-red-900/30 rounded text-slate-400 hover:text-red-400 transition-colors">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <p className="text-xs text-slate-500">
+              New Products Detected — SKUs found in an uploaded file that aren't in the Product Master yet.
+              Approve once and they're remembered forever.
+            </p>
+            <div className="card overflow-hidden">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-slate-800">
+                    <th className="table-head px-4 py-3 text-left">SKU Name</th>
+                    <th className="table-head px-4 py-3 text-left">Weight</th>
+                    <th className="table-head px-4 py-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {newLoading && <tr><td colSpan={3} className="text-center py-8 text-slate-500 text-sm">Loading…</td></tr>}
+                  {!newLoading && newProducts.length === 0 && (
+                    <tr><td colSpan={3} className="text-center py-8 text-slate-500 text-sm">
+                      No new products detected.
+                    </td></tr>
+                  )}
+                  {newProducts.map(p => (
+                    <tr key={p.warehouse_stock_id} className="transition-colors hover:bg-slate-800/30">
+                      <td className="table-cell font-medium text-slate-200">{p.title}</td>
+                      <td className="table-cell text-slate-400 font-mono text-xs">{p.weight || '—'}</td>
+                      <td className="table-cell text-right">
+                        <button
+                          onClick={() => approveMut.mutate(p.warehouse_stock_id)}
+                          disabled={approveMut.isPending}
+                          className="text-xs px-3 py-1.5 rounded font-medium bg-brand-600/20 text-brand-400 hover:bg-brand-600/30 border border-brand-700/40 inline-flex items-center gap-1">
+                          <Plus className="w-3.5 h-3.5" /> Add to Product Master
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
@@ -322,7 +462,7 @@ export default function WarehouseStock() {
         onClose={() => setDeleteTarget(null)}
         onConfirm={() => deleteMut.mutate(deleteTarget.id)}
         title="Delete SKU?"
-        message={`Remove "${deleteTarget?.title}" (${deleteTarget?.weight || 'no weight'}) from warehouse stock?`}
+        message={`Remove "${deleteTarget?.title}" (${deleteTarget?.weight || 'no weight'}) from warehouse stock and the Product Master?`}
         loading={deleteMut.isPending}
       />
 
@@ -331,7 +471,7 @@ export default function WarehouseStock() {
         onClose={() => setShowDeleteSelected(false)}
         onConfirm={() => deleteSelectedMut.mutate()}
         title="Delete Selected SKUs?"
-        message={`Remove ${selectedIds.size} selected SKU${selectedIds.size > 1 ? 's' : ''} from warehouse stock?`}
+        message={`Remove ${selectedIds.size} selected SKU${selectedIds.size > 1 ? 's' : ''} from warehouse stock and the Product Master?`}
         warning="This cannot be undone."
         loading={deleteSelectedMut.isPending}
       />
@@ -341,9 +481,19 @@ export default function WarehouseStock() {
         onClose={() => setShowDeleteAll(false)}
         onConfirm={() => deleteAllMut.mutate()}
         title="Delete All Stock?"
-        message="This will remove all warehouse stock data permanently."
-        warning="This cannot be undone. You will need to re-upload the XLSX."
+        message="This will remove all warehouse stock data and the Product Master permanently."
+        warning="This cannot be undone. You will need to re-upload the XLSX and re-approve products."
         loading={deleteAllMut.isPending}
+      />
+
+      <ConfirmDialog
+        open={!!pmDeleteTarget}
+        onClose={() => setPmDeleteTarget(null)}
+        onConfirm={() => deletePmMut.mutate(pmDeleteTarget.id)}
+        title="Delete Product?"
+        message={`Remove "${pmDeleteTarget?.sku_name}" (${pmDeleteTarget?.weight || 'no weight'}) from the Product Master? This removes it everywhere — Stock, Fulfilment Matrix, and Dashboard.`}
+        warning="This cannot be undone."
+        loading={deletePmMut.isPending}
       />
     </div>
   )

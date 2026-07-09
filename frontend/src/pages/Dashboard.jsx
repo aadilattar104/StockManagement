@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getDashboard } from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import FulfilmentMatrix from '../components/FulfilmentMatrix'
+import WarehouseStockMatrix from '../components/WarehouseStockMatrix'
 import { Link } from 'react-router-dom'
 import { ClipboardList, Package, TrendingDown, FileText, ArrowRight } from 'lucide-react'
 
@@ -44,6 +45,9 @@ export default function Dashboard() {
 
         {/* Fulfilment Matrix — first */}
         <FulfilmentMatrix />
+
+        {/* Warehouse Stock Matrix — below Fulfilment Matrix, always shows every Product Master SKU */}
+        <WarehouseStockMatrix />
 
         {/* KPIs */}
         <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">

@@ -3,7 +3,7 @@ import shutil
 import tempfile
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from database import supabase
-from models import StockUpdateRequest, StockActiveToggleRequest
+from models import StockUpdateRequest, ProductMasterEditRequest, ProductMasterReorderRequest
 from services.stock_loader import load_stock_from_xlsx
 
 router = APIRouter(prefix="/api/stock", tags=["stock"])
@@ -17,14 +17,6 @@ def stock_status(qty: int) -> str:
     return "healthy"
 
 
-def compute_is_active(stock_qty: int, manual_is_active) -> bool:
-    if stock_qty > 0:
-        return True
-    if manual_is_active is None:
-        return False
-    return bool(manual_is_active)
-
-
 def _nullify_stock_references(stock_ids: list):
     """Nullify matched_stock_id in so_line_items and invoice_line_items before deleting stock rows."""
     if not stock_ids:
@@ -36,6 +28,17 @@ def _nullify_stock_references(stock_ids: list):
         "matched_stock_id", stock_ids
     ).execute()
 
+
+def _next_order_index() -> int:
+    res = supabase.table("product_master").select("order_index").order(
+        "order_index", desc=True
+    ).limit(1).execute()
+    if res.data:
+        return (res.data[0].get("order_index") or 0) + 1
+    return 0
+
+
+# ─── Upload / Update (unchanged matching logic, is_active removed) ───────────
 
 @router.post("/upload")
 async def upload_stock(file: UploadFile = File(...)):
@@ -56,25 +59,20 @@ async def upload_stock(file: UploadFile = File(...)):
 
     upserted = []
     for row in rows:
-        existing = supabase.table("warehouse_stock").select("id,is_active").eq(
+        existing = supabase.table("warehouse_stock").select("id").eq(
             "title", row["title"]
         ).eq("weight", row["weight"] or "").execute()
 
         if existing.data:
             existing_row = existing.data[0]
-            stock_qty = row["stock_qty"]
-            if stock_qty > 0:
-                new_is_active = True
-            else:
-                new_is_active = existing_row.get("is_active", False)
-
             result = supabase.table("warehouse_stock").update({
-                "stock_qty": stock_qty,
-                "is_active": new_is_active,
+                "stock_qty": row["stock_qty"],
             }).eq("id", existing_row["id"]).execute()
             upserted.append(result.data[0] if result.data else None)
         else:
-            row["is_active"] = row["stock_qty"] > 0
+            # New SKU: land in warehouse_stock only. It will surface under
+            # "New Products Detected" in the Product Master until a user
+            # approves it — it is never auto-added to the Product Master.
             result = supabase.table("warehouse_stock").insert(row).execute()
             upserted.append(result.data[0] if result.data else None)
 
@@ -88,10 +86,11 @@ async def update_stock_from_xlsx(file: UploadFile = File(...)):
     or recreating any warehouse_stock rows.
 
     - Matches existing rows by (title, weight).
-    - If matched: updates stock_qty (and is_active) in place, preserving the
-      row's id so all FK relationships (Zypee SKU mapping, SO line items,
-      invoice line items, fulfilment matrix) keep working.
-    - If not matched: inserts a new warehouse_stock row (same as Upload Stock).
+    - If matched: updates stock_qty in place, preserving the row's id so all
+      FK relationships (Product Master, SO line items, invoice line items,
+      fulfilment matrix) keep working.
+    - If not matched: inserts a new warehouse_stock row (surfaces under
+      "New Products Detected" in the Product Master, same as Upload Stock).
     - Any existing warehouse_stock row NOT present in the uploaded file is
       kept, but its stock_qty is set to 0. It is never deleted.
     """
@@ -110,9 +109,7 @@ async def update_stock_from_xlsx(file: UploadFile = File(...)):
     if not rows:
         raise HTTPException(400, "No data rows found in XLSX")
 
-    # Snapshot all existing rows once, so we can (a) match efficiently and
-    # (b) know which ones weren't touched by this upload.
-    existing_res = supabase.table("warehouse_stock").select("id,title,weight,is_active").execute()
+    existing_res = supabase.table("warehouse_stock").select("id,title,weight").execute()
     existing_rows = existing_res.data or []
     existing_by_key = {
         (r["title"], r.get("weight") or ""): r for r in existing_rows
@@ -127,28 +124,18 @@ async def update_stock_from_xlsx(file: UploadFile = File(...)):
         existing_row = existing_by_key.get(key)
 
         if existing_row:
-            stock_qty = row["stock_qty"]
-            if stock_qty > 0:
-                new_is_active = True
-            else:
-                new_is_active = existing_row.get("is_active", False)
-
             result = supabase.table("warehouse_stock").update({
-                "stock_qty": stock_qty,
-                "is_active": new_is_active,
+                "stock_qty": row["stock_qty"],
             }).eq("id", existing_row["id"]).execute()
 
             matched_ids.add(existing_row["id"])
             updated.append(result.data[0] if result.data else None)
         else:
-            row["is_active"] = row["stock_qty"] > 0
             result = supabase.table("warehouse_stock").insert(row).execute()
             if result.data:
                 inserted.append(result.data[0])
                 matched_ids.add(result.data[0]["id"])
 
-    # Rows that existed before but weren't present in this upload:
-    # zero out their qty, but never delete them and never touch anything else.
     stale_ids = [r["id"] for r in existing_rows if r["id"] not in matched_ids]
     if stale_ids:
         supabase.table("warehouse_stock").update({
@@ -167,54 +154,45 @@ async def update_stock_from_xlsx(file: UploadFile = File(...)):
     }
 
 
+# ─── Stock tab — always driven by Product Master, in Product Master order ───
+
 @router.get("")
 async def get_stock():
-    result = supabase.table("warehouse_stock").select("*").order("title").execute()
-    rows = result.data or []
-    for row in rows:
-        row["status"] = stock_status(row.get("stock_qty", 0))
-        if row.get("stock_qty", 0) > 0:
-            row["is_active"] = True
+    """
+    Returns the Stock tab rows. Only SKUs approved into the Product Master
+    are shown, in the exact Product Master order — Product Master is the
+    single source of truth for which SKUs exist anywhere in the app.
+    """
+    pm_res = supabase.table("product_master").select("*").order("order_index").execute()
+    pm_rows = pm_res.data or []
+
+    stock_ids = [r["warehouse_stock_id"] for r in pm_rows if r.get("warehouse_stock_id")]
+    stock_map = {}
+    if stock_ids:
+        stock_res = supabase.table("warehouse_stock").select("*").in_("id", stock_ids).execute()
+        stock_map = {s["id"]: s for s in (stock_res.data or [])}
+
+    rows = []
+    for pm in pm_rows:
+        stock = stock_map.get(pm.get("warehouse_stock_id"), {})
+        qty = stock.get("stock_qty", 0)
+        rows.append({
+            "id": pm.get("warehouse_stock_id"),
+            "product_master_id": pm["id"],
+            "title": pm["sku_name"],
+            "weight": pm.get("weight"),
+            "stock_qty": qty,
+            "status": stock_status(qty),
+            "order_index": pm.get("order_index"),
+        })
     return rows
 
 
 @router.put("/{stock_id}")
 async def update_stock(stock_id: str, body: StockUpdateRequest):
     new_qty = body.stock_qty
-    update_payload = {"stock_qty": new_qty}
-    if new_qty > 0:
-        update_payload["is_active"] = True
-
-    result = supabase.table("warehouse_stock").update(update_payload).eq(
-        "id", stock_id
-    ).execute()
-
-    if not result.data:
-        raise HTTPException(404, "Stock row not found")
-
-    row = result.data[0]
-    row["status"] = stock_status(row.get("stock_qty", 0))
-    if row.get("stock_qty", 0) > 0:
-        row["is_active"] = True
-    return row
-
-
-@router.put("/{stock_id}/toggle-active")
-async def toggle_sku_active(stock_id: str, body: StockActiveToggleRequest):
-    current = supabase.table("warehouse_stock").select("stock_qty").eq(
-        "id", stock_id
-    ).execute()
-
-    if not current.data:
-        raise HTTPException(404, "Stock row not found")
-
-    stock_qty = current.data[0].get("stock_qty", 0)
-
-    if stock_qty > 0:
-        raise HTTPException(400, "Cannot mark inactive: stock qty is greater than 0. Set qty to 0 first.")
-
     result = supabase.table("warehouse_stock").update({
-        "is_active": body.is_active
+        "stock_qty": new_qty,
     }).eq("id", stock_id).execute()
 
     if not result.data:
@@ -227,19 +205,22 @@ async def toggle_sku_active(stock_id: str, body: StockActiveToggleRequest):
 
 @router.delete("/{stock_id}")
 async def delete_stock(stock_id: str):
-    # Nullify FK references before deleting
+    # Nullify FK references and remove any Product Master entry pointing here
     _nullify_stock_references([stock_id])
+    supabase.table("product_master").delete().eq("warehouse_stock_id", stock_id).execute()
     supabase.table("warehouse_stock").delete().eq("id", stock_id).execute()
     return {"deleted": stock_id}
 
 
 @router.delete("")
 async def delete_all_stock():
-    """Delete all rows from warehouse_stock."""
-    # Get all IDs first, then nullify references
+    """Delete all rows from warehouse_stock (and the Product Master with it)."""
     all_ids_res = supabase.table("warehouse_stock").select("id").execute()
     all_ids = [r["id"] for r in (all_ids_res.data or [])]
     _nullify_stock_references(all_ids)
+    supabase.table("product_master").delete().neq(
+        "id", "00000000-0000-0000-0000-000000000000"
+    ).execute()
     supabase.table("warehouse_stock").delete().neq(
         "id", "00000000-0000-0000-0000-000000000000"
     ).execute()
@@ -253,5 +234,139 @@ async def delete_selected_stock(payload: dict):
     if not ids:
         raise HTTPException(400, "No IDs provided")
     _nullify_stock_references(ids)
+    supabase.table("product_master").delete().in_("warehouse_stock_id", ids).execute()
     supabase.table("warehouse_stock").delete().in_("id", ids).execute()
     return {"deleted": ids}
+
+
+# ─── Product Master ───────────────────────────────────────────────────────────
+
+@router.get("/product-master")
+async def get_product_master():
+    """The permanent catalogue, in the user-configured global order."""
+    pm_res = supabase.table("product_master").select("*").order("order_index").execute()
+    pm_rows = pm_res.data or []
+
+    stock_ids = [r["warehouse_stock_id"] for r in pm_rows if r.get("warehouse_stock_id")]
+    stock_map = {}
+    if stock_ids:
+        stock_res = supabase.table("warehouse_stock").select("id,stock_qty").in_("id", stock_ids).execute()
+        stock_map = {s["id"]: s for s in (stock_res.data or [])}
+
+    result = []
+    for r in pm_rows:
+        stock = stock_map.get(r.get("warehouse_stock_id"), {})
+        qty = stock.get("stock_qty", 0)
+        result.append({
+            "id": r["id"],
+            "sku_name": r["sku_name"],
+            "weight": r.get("weight"),
+            "order_index": r.get("order_index"),
+            "warehouse_stock_id": r.get("warehouse_stock_id"),
+            "stock_qty": qty,
+            "status": stock_status(qty),
+        })
+    return result
+
+
+@router.get("/new-products")
+async def get_new_products():
+    """
+    Warehouse SKUs that came in via an upload but have not yet been approved
+    into the Product Master. Matched purely by absence from product_master —
+    a SKU already linked there never reappears here again.
+    """
+    pm_res = supabase.table("product_master").select("warehouse_stock_id").execute()
+    linked_ids = {r["warehouse_stock_id"] for r in (pm_res.data or []) if r.get("warehouse_stock_id")}
+
+    stock_res = supabase.table("warehouse_stock").select("id,title,weight,stock_qty").execute()
+    all_stock = stock_res.data or []
+
+    return [
+        {
+            "warehouse_stock_id": s["id"],
+            "title": s["title"],
+            "weight": s.get("weight"),
+            "stock_qty": s.get("stock_qty", 0),
+        }
+        for s in all_stock if s["id"] not in linked_ids
+    ]
+
+
+@router.post("/product-master/{warehouse_stock_id}/approve")
+async def approve_product(warehouse_stock_id: str):
+    """One-click approval: adds the SKU to the bottom of the Product Master."""
+    existing = supabase.table("product_master").select("id").eq(
+        "warehouse_stock_id", warehouse_stock_id
+    ).execute()
+    if existing.data:
+        raise HTTPException(400, "This SKU is already in the Product Master")
+
+    stock_res = supabase.table("warehouse_stock").select("id,title,weight").eq(
+        "id", warehouse_stock_id
+    ).execute()
+    if not stock_res.data:
+        raise HTTPException(404, "Warehouse stock row not found")
+    stock = stock_res.data[0]
+
+    result = supabase.table("product_master").insert({
+        "sku_name": stock["title"],
+        "weight": stock.get("weight"),
+        "warehouse_stock_id": warehouse_stock_id,
+        "order_index": _next_order_index(),
+    }).execute()
+
+    return result.data[0] if result.data else {}
+
+
+@router.put("/product-master/{product_id}")
+async def edit_product_master(product_id: str, body: ProductMasterEditRequest):
+    """Edit the SKU name and/or weight shown everywhere."""
+    payload = {}
+    if body.sku_name is not None:
+        payload["sku_name"] = body.sku_name
+    if body.weight is not None:
+        payload["weight"] = body.weight
+    if not payload:
+        raise HTTPException(400, "Nothing to update")
+
+    result = supabase.table("product_master").update(payload).eq("id", product_id).execute()
+    if not result.data:
+        raise HTTPException(404, "Product not found")
+    return result.data[0]
+
+
+@router.delete("/product-master/{product_id}")
+async def delete_product_master(product_id: str):
+    """
+    Removes a product from the catalogue entirely: the Product Master entry
+    and its underlying warehouse_stock row (with FK references nullified
+    first, same as the existing Delete Stock behaviour).
+    """
+    pm_res = supabase.table("product_master").select("warehouse_stock_id").eq(
+        "id", product_id
+    ).execute()
+    if not pm_res.data:
+        raise HTTPException(404, "Product not found")
+    stock_id = pm_res.data[0].get("warehouse_stock_id")
+
+    supabase.table("product_master").delete().eq("id", product_id).execute()
+
+    if stock_id:
+        _nullify_stock_references([stock_id])
+        supabase.table("warehouse_stock").delete().eq("id", stock_id).execute()
+
+    return {"deleted": product_id}
+
+
+@router.post("/product-master/reorder")
+async def reorder_product_master(body: ProductMasterReorderRequest):
+    """
+    Persists a full drag-and-drop (or move up/down) reorder. Expects the
+    complete list of product_master IDs in their new order.
+    """
+    for idx, product_id in enumerate(body.ordered_ids):
+        supabase.table("product_master").update({"order_index": idx}).eq(
+            "id", product_id
+        ).execute()
+    return {"reordered": len(body.ordered_ids)}

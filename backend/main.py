@@ -57,13 +57,29 @@ async def dashboard():
     ).execute()
     total_pending = sum(r.get("qty_pending", 0) for r in (pending_result.data or []))
 
-    low_stock = supabase.table("warehouse_stock").select("id", count="exact").lte(
-        "stock_qty", 30
-    ).gt("stock_qty", 0).eq("is_active", True).execute()
+    # Low/out stock counts and detail are scoped to Product Master SKUs only,
+    # since Product Master is now the single source of truth for which SKUs exist.
+    pm_res = supabase.table("product_master").select("warehouse_stock_id").execute()
+    pm_stock_ids = [r["warehouse_stock_id"] for r in (pm_res.data or []) if r.get("warehouse_stock_id")]
 
-    out_stock = supabase.table("warehouse_stock").select("id", count="exact").eq(
-        "stock_qty", 0
-    ).eq("is_active", True).execute()
+    low_stock_count = 0
+    out_stock_count = 0
+    low_stock_detail_rows = []
+    if pm_stock_ids:
+        low_stock = supabase.table("warehouse_stock").select("id", count="exact").in_(
+            "id", pm_stock_ids
+        ).lte("stock_qty", 30).gt("stock_qty", 0).execute()
+        low_stock_count = low_stock.count or 0
+
+        out_stock = supabase.table("warehouse_stock").select("id", count="exact").in_(
+            "id", pm_stock_ids
+        ).eq("stock_qty", 0).execute()
+        out_stock_count = out_stock.count or 0
+
+        low_stock_detail_res = supabase.table("warehouse_stock").select("*").in_(
+            "id", pm_stock_ids
+        ).lte("stock_qty", 30).order("stock_qty").limit(5).execute()
+        low_stock_detail_rows = low_stock_detail_res.data or []
 
     invoices_count = supabase.table("invoices").select("id", count="exact").execute()
 
@@ -108,37 +124,40 @@ async def dashboard():
             "display_status": display_status,
         })
 
-    low_stock_detail = supabase.table("warehouse_stock").select("*").lte(
-        "stock_qty", 30
-    ).eq("is_active", True).order("stock_qty").limit(5).execute()
-    for row in (low_stock_detail.data or []):
+    low_stock_detail = low_stock_detail_rows
+    for row in low_stock_detail:
         from routers.stock import stock_status
         row["status"] = stock_status(row.get("stock_qty", 0))
 
     return {
         "open_sos": open_sos.count or 0,
         "pending_units": total_pending,
-        "low_stock_skus": (low_stock.count or 0) + (out_stock.count or 0),
+        "low_stock_skus": low_stock_count + out_stock_count,
         "invoices_processed": invoices_count.count or 0,
         "recent_sos": enriched_recent_sos,
-        "low_stock_detail": low_stock_detail.data or [],
+        "low_stock_detail": low_stock_detail,
     }
 
 
 @app.get("/api/dashboard/fulfilment-matrix")
 async def fulfilment_matrix():
     """
-    Pivot matrix: ALL active SKUs as rows, open/partial SOs as columns.
-    - Rows = every active warehouse_stock row (is_active=True), even with zero demand.
+    Pivot matrix: ALL Product Master SKUs as rows (Product Master is the
+    single source of truth for which SKUs exist), open/partial SOs as columns.
+    - Rows = every Product Master SKU, in Product Master order, even with
+      zero demand and even if it currently has no warehouse_stock link.
     - Per-SO columns = static qty_ordered (original order, never changes after dispatch).
     - qty_to_be_sent = live sum of fulfilment_records.qty_pending across open/partial SOs.
     """
-    # 1. All active SKUs — this is now the base row set
-    stock_res = supabase.table("warehouse_stock") \
-        .select("id,title,weight,stock_qty") \
-        .eq("is_active", True).execute()
-    all_stock = stock_res.data or []
-    stock_map = {s["id"]: s for s in all_stock}
+    # 1. Product Master — this is now the base row set, in its configured order
+    pm_res = supabase.table("product_master").select("*").order("order_index").execute()
+    pm_rows = pm_res.data or []
+
+    stock_ids = [r["warehouse_stock_id"] for r in pm_rows if r.get("warehouse_stock_id")]
+    stock_map = {}
+    if stock_ids:
+        stock_res = supabase.table("warehouse_stock").select("id,stock_qty").in_("id", stock_ids).execute()
+        stock_map = {s["id"]: s for s in (stock_res.data or [])}
 
     # 2. All open/partial SOs (closed/fulfilled excluded — their demand is done)
     sos_res = supabase.table("sales_orders").select("id,so_number,vendor_name") \
@@ -146,20 +165,17 @@ async def fulfilment_matrix():
     sos = sos_res.data or []
     so_ids = [s["id"] for s in sos]
 
-    # Build pivot structures (empty by default — filled in if there are open SOs)
-    # so_qtys[sku_id][so_id] = static qty_ordered
+    # so_qtys[sku_id][so_id] = static qty_ordered ; pending[sku_id] = live qty_pending sum
+    # keyed by warehouse_stock_id, same as before
     so_qtys: dict = defaultdict(lambda: defaultdict(int))
-    # pending[sku_id] = sum of qty_pending from fulfilment_records
     pending: dict = defaultdict(int)
 
     if so_ids:
-        # 3. SO line items for open/partial SOs — for the static per-SO columns
         lines_res = supabase.table("so_line_items") \
             .select("id,so_id,matched_stock_id,qty_ordered") \
             .in_("so_id", so_ids).execute()
         lines = lines_res.data or []
 
-        # Build line_id -> matched_stock_id index for the fulfilment lookup
         line_id_to_stock: dict = {}
         for line in lines:
             sid = line.get("matched_stock_id")
@@ -167,7 +183,6 @@ async def fulfilment_matrix():
                 so_qtys[sid][line["so_id"]] += line.get("qty_ordered", 0)
                 line_id_to_stock[line["id"]] = sid
 
-        # 4. Fulfilment records for those lines — for the live qty_to_be_sent
         if line_id_to_stock:
             line_ids = list(line_id_to_stock.keys())
             fr_res = supabase.table("fulfilment_records") \
@@ -178,22 +193,24 @@ async def fulfilment_matrix():
                 if stock_id:
                     pending[stock_id] += fr.get("qty_pending", 0)
 
-    # 5. Build rows — one per active SKU, even with zero demand
+    # 3. Build rows — one per Product Master SKU, in Product Master order,
+    #    even with zero demand and even without a linked warehouse_stock row.
     rows = []
-    for sku in all_stock:
-        sku_id = sku["id"]
-        qty_to_be_sent = pending.get(sku_id, 0)
+    for pm in pm_rows:
+        stock_id = pm.get("warehouse_stock_id")
+        warehouse_stock_qty = stock_map.get(stock_id, {}).get("stock_qty", 0) if stock_id else 0
+        qty_to_be_sent = pending.get(stock_id, 0) if stock_id else 0
         rows.append({
-            "sku_id": sku_id,
-            "sku_title": sku.get("title", "Unknown SKU"),
-            "sku_weight": sku.get("weight"),
-            "warehouse_stock": sku.get("stock_qty", 0),
+            "sku_id": stock_id,
+            "product_master_id": pm["id"],
+            "sku_title": pm.get("sku_name", "Unknown SKU"),
+            "sku_weight": pm.get("weight"),
+            "warehouse_stock": warehouse_stock_qty,
             "qty_to_be_sent": qty_to_be_sent,
-            "so_qtys": dict(so_qtys.get(sku_id, {})),
+            "so_qtys": dict(so_qtys.get(stock_id, {})) if stock_id else {},
         })
 
-    # 6. Sort: falling short first (stock < demand), then alphabetical
-    rows.sort(key=lambda r: (r["warehouse_stock"] >= r["qty_to_be_sent"], r["sku_title"]))
+    # Order is the Product Master order — never re-sorted alphabetically or by shortage.
 
     return {
         "so_columns": [
@@ -202,6 +219,99 @@ async def fulfilment_matrix():
         ],
         "rows": rows,
     }
+
+
+@app.get("/api/dashboard/warehouse-stock-matrix")
+async def warehouse_stock_matrix():
+    """
+    Warehouse Stock Matrix: every Product Master SKU (in Product Master
+    order) against the main warehouse plus per-city warehouses.
+
+    City columns are sourced from the Zypee flow: `zypee_sku_mappings` links
+    a warehouse_stock_id to its Zypee SKU name, and for each warehouse we
+    look at only its single latest `zypee_uploads` row (older uploads are
+    ignored, per spec) to get that SKU's `old_quantity` from `zypee_stock`.
+    A SKU with no Zypee mapping, or missing from a warehouse's latest
+    upload, displays "-" rather than being hidden or shown as 0.
+    """
+    WAREHOUSE_LABELS = {"BLR": "Bangalore", "MUM": "Mumbai", "PUN": "Pune", "DEL": "Delhi"}
+    warehouse_columns = list(WAREHOUSE_LABELS.values())
+
+    pm_res = supabase.table("product_master").select("*").order("order_index").execute()
+    pm_rows = pm_res.data or []
+
+    stock_ids = [r["warehouse_stock_id"] for r in pm_rows if r.get("warehouse_stock_id")]
+    stock_map = {}
+    if stock_ids:
+        stock_res = supabase.table("warehouse_stock").select("id,stock_qty").in_("id", stock_ids).execute()
+        stock_map = {s["id"]: s for s in (stock_res.data or [])}
+
+    # warehouse_stock_id -> Zypee mapping (zypee_sku_name), so we know which
+    # Zypee SKU name each Product Master product corresponds to.
+    mappings_res = supabase.table("zypee_sku_mappings").select(
+        "id,zypee_sku_name,warehouse_stock_id"
+    ).execute()
+    mapping_by_stock_id = {
+        m["warehouse_stock_id"]: m
+        for m in (mappings_res.data or []) if m.get("warehouse_stock_id")
+    }
+
+    # For each warehouse, pull ONLY its latest upload's stock (by name),
+    # exactly like /api/zypee/compare does when no explicit date is passed.
+    per_warehouse_qty_by_name: dict = {}
+    for wh in zypee.VALID_WAREHOUSES:
+        upload_q = (
+            supabase.table("zypee_uploads")
+            .select("id")
+            .eq("warehouse", wh)
+            .order("stock_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not upload_q.data:
+            continue
+        upload_id = upload_q.data[0]["id"]
+        stock_rows = (
+            supabase.table("zypee_stock")
+            .select("name,old_quantity")
+            .eq("upload_id", upload_id)
+            .execute()
+        )
+        per_warehouse_qty_by_name[wh] = {
+            r["name"].strip().lower(): r["old_quantity"] for r in (stock_rows.data or [])
+        }
+
+    rows = []
+    for pm in pm_rows:
+        stock_id = pm.get("warehouse_stock_id")
+        warehouse_stock_qty = stock_map.get(stock_id, {}).get("stock_qty", 0) if stock_id else 0
+
+        mapping = mapping_by_stock_id.get(stock_id) if stock_id else None
+        city_stock = {}
+        for wh_code, label in WAREHOUSE_LABELS.items():
+            if not mapping:
+                city_stock[label] = "-"
+                continue
+            key = mapping["zypee_sku_name"].strip().lower()
+            wh_data = per_warehouse_qty_by_name.get(wh_code)
+            city_stock[label] = wh_data.get(key, "-") if wh_data is not None else "-"
+
+        rows.append({
+            "sku_id": stock_id,
+            "product_master_id": pm["id"],
+            "sku_title": pm.get("sku_name", "Unknown SKU"),
+            "sku_weight": pm.get("weight"),
+            "warehouse_stock": warehouse_stock_qty,
+            "city_stock": city_stock,
+        })
+
+    return {
+        "warehouse_columns": warehouse_columns,
+        "rows": rows,
+    }
+
+
+
 
 
 # ─── Dev: Load Samples ────────────────────────────────────────────────────────
@@ -245,11 +355,15 @@ async def load_samples():
             if existing.data:
                 results["sales_order"] = f"SO {so_number} already exists"
             else:
-                # Only match against active stock
-                stock_result = supabase.table("warehouse_stock").select(
-                    "id,title,weight"
-                ).eq("is_active", True).execute()
-                stock_rows = stock_result.data or []
+                # Only match against SKUs that exist in the Product Master
+                pm_ids_res = supabase.table("product_master").select("warehouse_stock_id").execute()
+                pm_stock_ids = [r["warehouse_stock_id"] for r in (pm_ids_res.data or []) if r.get("warehouse_stock_id")]
+                stock_rows = []
+                if pm_stock_ids:
+                    stock_result = supabase.table("warehouse_stock").select(
+                        "id,title,weight"
+                    ).in_("id", pm_stock_ids).execute()
+                    stock_rows = stock_result.data or []
 
                 so_insert = supabase.table("sales_orders").insert({
                     "so_number": so_number,
@@ -309,11 +423,15 @@ async def load_samples():
             else:
                 from routers.invoices import _recompute_so_status
 
-                # Only match against active stock
-                stock_result = supabase.table("warehouse_stock").select(
-                    "id,title,weight"
-                ).eq("is_active", True).execute()
-                stock_rows = stock_result.data or []
+                # Only match against SKUs that exist in the Product Master
+                pm_ids_res2 = supabase.table("product_master").select("warehouse_stock_id").execute()
+                pm_stock_ids2 = [r["warehouse_stock_id"] for r in (pm_ids_res2.data or []) if r.get("warehouse_stock_id")]
+                stock_rows = []
+                if pm_stock_ids2:
+                    stock_result = supabase.table("warehouse_stock").select(
+                        "id,title,weight"
+                    ).in_("id", pm_stock_ids2).execute()
+                    stock_rows = stock_result.data or []
 
                 linked_so_ids = []
                 so_ref = extracted_inv.get("so_reference")

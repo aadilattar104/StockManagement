@@ -28,8 +28,18 @@ export const updateStock = (id, stock_qty) =>
 export const deleteStock = (id) => api.delete(`/stock/${id}`).then(r => r.data)
 export const deleteAllStock = () => api.delete(`/stock`).then(r => r.data)
 export const deleteSelectedStock = (ids) => api.post(`/stock/delete-selected`, { ids }).then(r => r.data)
-export const toggleSkuActive = (id, is_active) =>
-  api.put(`/stock/${id}/toggle-active`, { is_active }).then(r => r.data)
+
+// ─── Product Master ───────────────────────────────────────────────────────────
+export const getProductMaster = () => api.get('/stock/product-master').then(r => r.data)
+export const getNewProducts = () => api.get('/stock/new-products').then(r => r.data)
+export const approveProduct = (warehouseStockId) =>
+  api.post(`/stock/product-master/${warehouseStockId}/approve`).then(r => r.data)
+export const editProductMaster = (id, payload) =>
+  api.put(`/stock/product-master/${id}`, payload).then(r => r.data)
+export const deleteProductMaster = (id) => api.delete(`/stock/product-master/${id}`).then(r => r.data)
+export const reorderProductMaster = (orderedIds) =>
+  api.post('/stock/product-master/reorder', { ordered_ids: orderedIds }).then(r => r.data)
+export const getWarehouseStockMatrix = () => api.get('/dashboard/warehouse-stock-matrix').then(r => r.data)
 
 // ─── Sales Orders ─────────────────────────────────────────────────────────────
 export const getSalesOrders = () => api.get('/sales-orders').then(r => r.data)

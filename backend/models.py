@@ -8,7 +8,6 @@ class StockRow(BaseModel):
     title: str
     weight: Optional[str] = None
     stock_qty: int = 0
-    is_active: Optional[bool] = None
     updated_at: Optional[datetime] = None
 
 
@@ -16,8 +15,13 @@ class StockUpdateRequest(BaseModel):
     stock_qty: int
 
 
-class StockActiveToggleRequest(BaseModel):
-    is_active: bool
+class ProductMasterEditRequest(BaseModel):
+    sku_name: Optional[str] = None
+    weight: Optional[str] = None
+
+
+class ProductMasterReorderRequest(BaseModel):
+    ordered_ids: List[str]
 
 
 class SOLineItemIn(BaseModel):

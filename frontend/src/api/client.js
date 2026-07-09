@@ -19,6 +19,10 @@ export const uploadStock = (file) => {
   const fd = new FormData(); fd.append('file', file)
   return api.post('/stock/upload', fd).then(r => r.data)
 }
+export const updateStockFromXlsx = (file) => {
+  const fd = new FormData(); fd.append('file', file)
+  return api.post('/stock/update', fd).then(r => r.data)
+}
 export const updateStock = (id, stock_qty) =>
   api.put(`/stock/${id}`, { stock_qty }).then(r => r.data)
 export const deleteStock = (id) => api.delete(`/stock/${id}`).then(r => r.data)

@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getStock, uploadStock, updateStock, deleteStock, toggleSkuActive, deleteAllStock, deleteSelectedStock } from '../api/client'
+import { getStock, uploadStock, updateStockFromXlsx, updateStock, deleteStock, toggleSkuActive, deleteAllStock, deleteSelectedStock } from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import UploadZone from '../components/UploadZone'
 import ConfirmDialog from '../components/ConfirmDialog'
-import { Pencil, Trash2, Check, X, Upload } from 'lucide-react'
+import { Pencil, Trash2, Check, X, Upload, RefreshCw } from 'lucide-react'
 
 export default function WarehouseStock() {
   const qc = useQueryClient()
@@ -19,6 +19,8 @@ export default function WarehouseStock() {
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [uploadMsg, setUploadMsg] = useState(null)
   const [showUpload, setShowUpload] = useState(false)
+  const [updateMsg, setUpdateMsg] = useState(null)
+  const [showUpdate, setShowUpdate] = useState(false)
 
   const uploadMut = useMutation({
     mutationFn: uploadStock,
@@ -33,6 +35,20 @@ export default function WarehouseStock() {
   const updateMut = useMutation({
     mutationFn: ({ id, qty }) => updateStock(id, qty),
     onSuccess: () => { qc.invalidateQueries(['stock']); setEditId(null) }
+  })
+
+  const updateStockMut = useMutation({
+    mutationFn: updateStockFromXlsx,
+    onSuccess: (data) => {
+      // Existing warehouse_stock IDs never change on this endpoint, so
+      // invalidating these caches is enough to refresh everything downstream
+      // (Fulfilment Matrix, Zypee compare, etc.) without any remapping.
+      qc.invalidateQueries(['stock'])
+      qc.invalidateQueries(['fulfilment-matrix'])
+      setUpdateMsg(data.message)
+      setShowUpdate(false)
+      setTimeout(() => setUpdateMsg(null), 4000)
+    }
   })
 
   const deleteMut = useMutation({
@@ -113,7 +129,10 @@ export default function WarehouseStock() {
               <Trash2 className="w-4 h-4" /> Delete All
             </button>
           )}
-          <button onClick={() => setShowUpload(!showUpload)} className="btn-primary">
+          <button onClick={() => { setShowUpdate(!showUpdate); setShowUpload(false) }} className="btn-secondary">
+            <RefreshCw className="w-4 h-4" /> Update Stock
+          </button>
+          <button onClick={() => { setShowUpload(!showUpload); setShowUpdate(false) }} className="btn-primary">
             <Upload className="w-4 h-4" /> Upload XLSX
           </button>
         </div>
@@ -126,9 +145,27 @@ export default function WarehouseStock() {
         </div>
       )}
 
+      {showUpdate && (
+        <div className="card p-5">
+          <p className="text-xs text-slate-500 mb-3">
+            Upload the latest warehouse stock XLSX. Existing SKUs are matched by product + weight and
+            updated in place — IDs, Zypee mappings, Sales Orders, and Invoices stay intact. SKUs missing
+            from this file are kept but set to 0 qty (never deleted).
+          </p>
+          <UploadZone accept=".xlsx" label="Update warehouse stock XLSX"
+            onFile={(f) => updateStockMut.mutate(f)} loading={updateStockMut.isPending} />
+        </div>
+      )}
+
       {uploadMsg && (
         <div className="p-3 bg-brand-600/10 border border-brand-700/30 rounded-lg text-sm text-brand-400">
           ✓ {uploadMsg}
+        </div>
+      )}
+
+      {updateMsg && (
+        <div className="p-3 bg-brand-600/10 border border-brand-700/30 rounded-lg text-sm text-brand-400">
+          ✓ {updateMsg}
         </div>
       )}
 

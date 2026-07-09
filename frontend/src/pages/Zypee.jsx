@@ -2,10 +2,10 @@ import { useState, useMemo, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   getZypeeUploads, uploadZypee, deleteZypeeUpload, getZypeeStock,
-  uploadInTransit, getInTransit, deleteInTransit, getZypeeCompareTable, deleteTransitPo, replaceTransitPo
+  uploadInTransit, getInTransit, deleteInTransit, replaceTransitPo
 } from '../api/client'
 import ConfirmDialog from '../components/ConfirmDialog'
-import { Upload, Truck, Trash2, Download, History, Calendar, Filter, LayoutGrid, Search, BookOpen, Plus, X, FileDown, GripVertical, AlertTriangle, Link2, ChevronDown, ChevronRight } from 'lucide-react'
+import { Upload, Truck, Trash2, Download, History, Calendar, Filter, Search, BookOpen, Plus, X, FileDown, GripVertical, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react'
 
 const WAREHOUSES = ['MUM', 'PUN', 'DEL', 'BLR']
 const WH_LABELS = { MUM: 'Mumbai', PUN: 'Pune', DEL: 'Delhi', BLR: 'Bangalore' }
@@ -227,7 +227,7 @@ function InTransitTab() {
     mutationFn: deleteInTransit,
     onSuccess: () => {
       qc.invalidateQueries(['zypee-in-transit'])
-      qc.invalidateQueries(['zypee-compare-table'])
+      qc.invalidateQueries(['warehouse-stock-matrix'])
       setDeleteTarget(null)
     },
   })
@@ -273,7 +273,7 @@ function InTransitTab() {
         }
         if (!data.duplicate) {
           qc.invalidateQueries(['zypee-in-transit'])
-          qc.invalidateQueries(['zypee-compare-table'])
+          qc.invalidateQueries(['warehouse-stock-matrix'])
         }
       } catch (e) {
         results.push({ filename: file.name, error: e.message || 'Upload failed' })
@@ -296,7 +296,7 @@ function InTransitTab() {
         rows: result.rows_payload || [],
       })
       qc.invalidateQueries(['zypee-in-transit'])
-      qc.invalidateQueries(['zypee-compare-table'])
+      qc.invalidateQueries(['warehouse-stock-matrix'])
       setUploadResults(prev => [...prev, {
         filename: dupConfirm.filename,
         result: { ...result, replaced: true, matched: (result.rows_payload || []).length, duplicate: false },
@@ -520,306 +520,6 @@ function InTransitTab() {
         message={`Remove "${deleteTarget?.label}" from in-transit?`}
         warning="This will permanently delete the selected in-transit row(s)."
         loading={deleteMut.isPending}
-      />
-    </div>
-  )
-}
-
-// ── COMPARE TAB ───────────────────────────────────────────────────────────────
-function CompareTab() {
-  const qc = useQueryClient()
-  const [search, setSearch] = useState('')
-  const [deletePoTarget, setDeletePoTarget] = useState(null)
-
-  const { data: apiData = { rows: [], po_columns: {} }, isLoading, error } = useQuery({
-    queryKey: ['zypee-compare-table'],
-    queryFn: getZypeeCompareTable,
-  })
-
-  const deletePoMut = useMutation({
-    mutationFn: deleteTransitPo,
-    onSuccess: () => {
-      qc.invalidateQueries(['zypee-compare-table'])
-      qc.invalidateQueries(['zypee-in-transit'])
-      setDeletePoTarget(null)
-    },
-  })
-
-  const rows = apiData.rows || []
-  const poColumns = apiData.po_columns || {}
-
-  const allColumns = useMemo(() => {
-    const cols = []
-    for (const wh of WAREHOUSES) {
-      cols.push({ type: 'stock', warehouse: wh, key: `${wh.toLowerCase()}_stock` })
-      for (const col of (poColumns[wh] || [])) {
-        cols.push({ type: 'transit', ...col })
-      }
-    }
-    return cols
-  }, [poColumns])
-
-  const filtered = useMemo(() => {
-    if (!search.trim()) return rows
-    const s = search.toLowerCase()
-    return rows.filter(r => r.zypee_sku_name?.toLowerCase().includes(s))
-  }, [rows, search])
-
-  const WH_STOCK_COLORS = {
-    MUM: 'text-blue-400/80', PUN: 'text-purple-400/80',
-    DEL: 'text-amber-400/80', BLR: 'text-emerald-400/80',
-  }
-  const WH_TRANSIT_COLORS = {
-    MUM: 'text-blue-400/50', PUN: 'text-purple-400/50',
-    DEL: 'text-amber-400/50', BLR: 'text-emerald-400/50',
-  }
-
-  function numStock(v) {
-    if (v === null || v === undefined) return <span className="text-slate-700">—</span>
-    return <span className={v === 0 ? 'text-red-400' : v <= 10 ? 'text-amber-400' : 'text-slate-200'}>{v}</span>
-  }
-
-  function fmtShort(d) {
-    if (!d) return '—'
-    const [y, m, day] = d.split('-')
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-    return `${parseInt(day)}-${months[parseInt(m)-1]}-${y}`
-  }
-
-  // ── CSV download ──────────────────────────────────────────────────────────
-  function downloadCsv() {
-    if (!rows.length) return
-    const headers = ['Zypee SKU', 'WH Stock', ...allColumns.map(col =>
-      col.type === 'stock' ? `${col.warehouse} Stock` : `${col.warehouse} Transit (${fmtShort(col.po_date)})`
-    )]
-    const csvRows = rows.map(r => {
-      const cells = [`"${r.zypee_sku_name}"`, r.wh_stock ?? '']
-      for (const col of allColumns) {
-        if (col.type === 'stock') cells.push(r[col.key] ?? '')
-        else { const t = r[col.column_key]; cells.push(t?.qty ?? '') }
-      }
-      return cells.join(',')
-    })
-    const csv = [headers.join(','), ...csvRows].join('\n')
-    const blob = new Blob([csv], { type: 'text/csv' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a'); a.href = url
-    a.download = `zypee_compare_${new Date().toISOString().slice(0, 10)}.csv`
-    a.click(); URL.revokeObjectURL(url)
-  }
-
-  // ── PDF download ──────────────────────────────────────────────────────────
-  function downloadPdf() {
-    if (!rows.length) return
-
-    const headers = ['Zypee SKU', 'WH Stock', ...allColumns.map(col =>
-      col.type === 'stock' ? `${col.warehouse} Stock` : `${col.warehouse} Transit\n${fmtShort(col.po_date)}`
-    )]
-
-    // Column widths (pt): SKU wide, rest narrow
-    const colWidths = [160, 48, ...allColumns.map(() => 52)]
-    const totalWidth = colWidths.reduce((s, w) => s + w, 0)
-    const pageW = Math.max(totalWidth + 40, 595)
-    const pageH = 420 // landscape A4-ish height
-
-    const MARGIN = 20
-    const ROW_H = 18
-    const HEADER_H = 28
-    const FONT_SIZE = 6.5
-    const TITLE_SIZE = 9
-
-    // Build SVG — we'll convert to PDF-like printable HTML
-    // Using window.print with a hidden iframe for landscape PDF
-    const colorsMap = { MUM: '#3b82f6', PUN: '#a855f7', DEL: '#f59e0b', BLR: '#10b981' }
-
-    let html = `<!DOCTYPE html><html><head><style>
-      @page { size: ${pageW}pt ${pageH}pt landscape; margin: 0; }
-      * { box-sizing: border-box; margin: 0; padding: 0; font-family: Arial, sans-serif; }
-      body { padding: 16pt; background: white; }
-      h1 { font-size: ${TITLE_SIZE}pt; color: #1e293b; margin-bottom: 8pt; }
-      p.sub { font-size: 6pt; color: #64748b; margin-bottom: 10pt; }
-      table { border-collapse: collapse; width: 100%; font-size: ${FONT_SIZE}pt; }
-      th { background: #1e293b; color: #94a3b8; padding: 4pt 3pt; text-align: right; border: 0.5pt solid #334155; white-space: pre-line; font-weight: 600; font-size: 5.5pt; text-transform: uppercase; letter-spacing: 0.3pt; }
-      th.sku-col { text-align: left; }
-      td { padding: 3pt 3pt; text-align: right; border: 0.5pt solid #1e293b; background: #0f172a; color: #cbd5e1; }
-      td.sku-col { text-align: left; font-size: 6pt; color: #e2e8f0; }
-      tr:nth-child(even) td { background: #0f172a; }
-      tr:nth-child(odd) td { background: #0b1222; }
-      .zero { color: #ef4444; }
-      .low { color: #f59e0b; }
-      .dash { color: #334155; }
-    </style></head><body>`
-
-    html += `<h1>Zypee Stock + In Transit Compare</h1>`
-    html += `<p class="sub">Generated: ${new Date().toLocaleString('en-IN')} &nbsp;|&nbsp; ${rows.length} SKUs</p>`
-    html += `<table><thead><tr>`
-    html += `<th class="sku-col" style="width:${colWidths[0]}pt">Zypee SKU</th>`
-    html += `<th style="width:${colWidths[1]}pt">WH Stock</th>`
-    allColumns.forEach((col, i) => {
-      const color = colorsMap[col.warehouse] || '#94a3b8'
-      const opacity = col.type === 'stock' ? '1' : '0.65'
-      const label = col.type === 'stock'
-        ? `${col.warehouse} Stock`
-        : `${col.warehouse} Transit\n${fmtShort(col.po_date)}`
-      html += `<th style="width:${colWidths[i+2]}pt;color:${color};opacity:${opacity}">${label}</th>`
-    })
-    html += `</tr></thead><tbody>`
-
-    rows.forEach(row => {
-      html += `<tr>`
-      html += `<td class="sku-col">${row.zypee_sku_name}</td>`
-      const whQty = row.wh_stock ?? 0
-      html += `<td class="${whQty === 0 ? 'zero' : whQty <= 10 ? 'low' : ''}">${whQty}</td>`
-      allColumns.forEach(col => {
-        if (col.type === 'stock') {
-          const v = row[col.key] ?? 0
-          html += `<td class="${v === 0 ? 'zero' : v <= 10 ? 'low' : ''}">${v}</td>`
-        } else {
-          const t = row[col.column_key]
-          if (t === null || t === undefined) {
-            html += `<td class="dash">—</td>`
-          } else {
-            html += `<td class="${t.qty === 0 ? 'dash' : ''}">${t.qty}</td>`
-          }
-        }
-      })
-      html += `</tr>`
-    })
-
-    html += `</tbody></table></body></html>`
-
-    const iframe = document.createElement('iframe')
-    iframe.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;'
-    document.body.appendChild(iframe)
-    iframe.contentDocument.open()
-    iframe.contentDocument.write(html)
-    iframe.contentDocument.close()
-    setTimeout(() => {
-      iframe.contentWindow.print()
-      setTimeout(() => document.body.removeChild(iframe), 2000)
-    }, 400)
-  }
-
-  const totalCols = 2 + allColumns.length
-
-  return (
-    <div className="space-y-6">
-      {/* Controls */}
-      <div className="card p-4 flex flex-wrap items-center gap-4">
-        <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
-          <input
-            type="text"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search SKUs…"
-            className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded pl-8 pr-3 py-1.5 focus:outline-none focus:border-brand-500 placeholder-slate-600 w-56"
-          />
-        </div>
-        <div className="ml-auto flex items-center gap-3">
-          {rows.length > 0 && (<>
-            <button
-              onClick={downloadCsv}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-sm transition-colors"
-            >
-              <Download className="w-4 h-4" />
-              CSV
-            </button>
-            <button
-              onClick={downloadPdf}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-sm transition-colors"
-            >
-              <FileDown className="w-4 h-4" />
-              PDF
-            </button>
-          </>)}
-        </div>
-      </div>
-
-      {isLoading && <div className="card py-16 text-center"><p className="text-slate-500 text-sm">Loading compare table…</p></div>}
-      {error && <div className="card p-4 border border-red-800/40"><p className="text-red-400 text-sm">{error.message}</p></div>}
-      {!isLoading && rows.length === 0 && !error && (
-        <div className="card py-20 text-center space-y-3">
-          <Link2 className="w-8 h-8 text-slate-700 mx-auto" />
-          <p className="text-slate-500 text-sm">No data yet.</p>
-          <p className="text-slate-600 text-xs">Upload Zypee stock CSVs and create SKU mappings first.</p>
-        </div>
-      )}
-
-      {!isLoading && rows.length > 0 && (
-        <div className="card overflow-hidden">
-          <div className="px-5 py-3 border-b border-slate-800 flex items-center gap-3">
-            <span className="text-sm font-semibold text-slate-200">Stock + In Transit</span>
-            <span className="text-xs text-slate-500">· {rows.length} SKUs</span>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-800 bg-slate-800/40">
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider sticky left-0 bg-slate-800/40 z-10">Zypee SKU</th>
-                  <th className="px-3 py-3 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider">WH Stock</th>
-                  {allColumns.map(col => {
-                    if (col.type === 'stock') return (
-                      <th key={col.key} className={`px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider ${WH_STOCK_COLORS[col.warehouse]}`}>
-                        {col.warehouse} Stock
-                      </th>
-                    )
-                    return (
-                      <th key={col.column_key} className={`px-3 py-3 text-right text-xs font-semibold uppercase tracking-wider ${WH_TRANSIT_COLORS[col.warehouse]}`}>
-                        <div className="flex flex-col items-end gap-0.5">
-                          <span>{col.warehouse} Transit</span>
-                          <div className="flex items-center gap-1">
-                            <span className="text-[10px] font-normal text-slate-500 normal-case tracking-normal">{fmtShort(col.po_date)}</span>
-                            <button onClick={() => setDeletePoTarget(col)}
-                              className="p-0.5 hover:bg-red-900/40 rounded text-slate-600 hover:text-red-400 transition-all"
-                              title={`Delete PO ${col.po_number}`}>
-                              <Trash2 className="w-2.5 h-2.5" />
-                            </button>
-                          </div>
-                        </div>
-                      </th>
-                    )
-                  })}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60">
-                {filtered.length === 0 && (
-                  <tr><td colSpan={totalCols} className="py-10 text-center text-slate-500 text-sm">No results match search.</td></tr>
-                )}
-                {filtered.map((row, i) => (
-                  <tr key={row.zypee_sku_name} className={`hover:bg-slate-800/30 transition-colors ${i % 2 === 1 ? 'bg-slate-800/10' : ''}`}>
-                    <td className="px-4 py-3 text-slate-200 text-xs font-medium sticky left-0 bg-inherit">{row.zypee_sku_name}</td>
-                    <td className="px-3 py-3 text-right font-mono text-xs">{numStock(row.wh_stock)}</td>
-                    {allColumns.map(col => {
-                      if (col.type === 'stock') return (
-                        <td key={col.key} className="px-3 py-3 text-right font-mono text-xs">{numStock(row[col.key])}</td>
-                      )
-                      const t = row[col.column_key]
-                      return (
-                        <td key={col.column_key} className="px-3 py-3 text-right font-mono text-xs">
-                          {t === null || t === undefined
-                            ? <span className="text-slate-700">—</span>
-                            : <span className={t.qty === 0 ? 'text-slate-600' : WH_TRANSIT_COLORS[col.warehouse]}>{t.qty}</span>
-                          }
-                        </td>
-                      )
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      <ConfirmDialog
-        open={!!deletePoTarget}
-        onClose={() => setDeletePoTarget(null)}
-        onConfirm={() => deletePoMut.mutate({ warehouse: deletePoTarget.warehouse, po_date: deletePoTarget.po_date, po_number: deletePoTarget.po_number })}
-        title="Delete PO Upload?"
-        message={`Warehouse: ${deletePoTarget?.warehouse} · PO Number: ${deletePoTarget?.po_number} · PO Date: ${fmtShort(deletePoTarget?.po_date)}`}
-        warning="This will permanently delete all transit rows for this PO. The entire column will disappear."
-        loading={deletePoMut.isPending}
       />
     </div>
   )
@@ -1210,7 +910,7 @@ function SkuMasterTab() {
 export default function Zypee() {
   const qc = useQueryClient()
   const fileInputRef = useRef(null)
-  const [activeTab, setActiveTab] = useState('stock') // 'stock' | 'in-transit' | 'compare' | 'skumaster'
+  const [activeTab, setActiveTab] = useState('stock') // 'stock' | 'in-transit' | 'skumaster'
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [error, setError] = useState(null)
   const [uploadSuccess, setUploadSuccess] = useState(null)
@@ -1322,17 +1022,6 @@ export default function Zypee() {
           In Transit
         </button>
         <button
-          onClick={() => setActiveTab('compare')}
-          className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px flex items-center gap-2 ${
-            activeTab === 'compare'
-              ? 'border-brand-500 text-slate-100'
-              : 'border-transparent text-slate-500 hover:text-slate-300'
-          }`}
-        >
-          <LayoutGrid className="w-3.5 h-3.5" />
-          Compare Warehouses
-        </button>
-        <button
           onClick={() => setActiveTab('skumaster')}
           className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px flex items-center gap-2 ${
             activeTab === 'skumaster'
@@ -1355,9 +1044,6 @@ export default function Zypee() {
       )}
       {activeTab === 'in-transit' && (
         <InTransitTab />
-      )}
-      {activeTab === 'compare' && (
-        <CompareTab />
       )}
       {activeTab === 'skumaster' && (
         <SkuMasterTab />

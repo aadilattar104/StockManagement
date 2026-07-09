@@ -281,6 +281,46 @@ async def warehouse_stock_matrix():
             r["name"].strip().lower(): r["old_quantity"] for r in (stock_rows.data or [])
         }
 
+    # ── PO In Transit columns (moved here from the old /api/zypee/compare,
+    # which powered the now-removed Compare Warehouses tab). Same logic,
+    # keyed by zypee_sku_mapping_id. ──────────────────────────────────────
+    transit_res = supabase.table("zypee_in_transit").select(
+        "id,zypee_sku_mapping_id,warehouse,qty,po_date,po_number"
+    ).execute()
+    transit_rows = transit_res.data or []
+
+    po_columns: dict = {wh: [] for wh in ["MUM", "PUN", "DEL", "BLR"]}
+    seen_column_keys: set = set()
+    for t in transit_rows:
+        wh = t["warehouse"]
+        po_date_raw = t["po_date"] or ""
+        po_date_key = po_date_raw.replace("-", "_")
+        col_key = f"{wh.lower()}_{po_date_key}"
+        if col_key not in seen_column_keys and wh in po_columns:
+            po_columns[wh].append({
+                "column_key": col_key,
+                "warehouse": wh,
+                "po_date": po_date_raw,
+                "po_number": t["po_number"],
+            })
+            seen_column_keys.add(col_key)
+
+    for wh in po_columns:
+        po_columns[wh].sort(key=lambda c: c["po_date"], reverse=True)
+
+    transit_lookup: dict = {}
+    for t in transit_rows:
+        mid = t["zypee_sku_mapping_id"]
+        wh = t["warehouse"]
+        po_date_raw = t["po_date"] or ""
+        po_date_key = po_date_raw.replace("-", "_")
+        col_key = f"{wh.lower()}_{po_date_key}"
+        transit_lookup.setdefault(mid, {})[col_key] = {
+            "qty": t["qty"],
+            "po_number": t["po_number"],
+            "po_date": po_date_raw,
+        }
+
     rows = []
     for pm in pm_rows:
         stock_id = pm.get("warehouse_stock_id")
@@ -296,6 +336,14 @@ async def warehouse_stock_matrix():
             wh_data = per_warehouse_qty_by_name.get(wh_code)
             city_stock[label] = wh_data.get(key, "-") if wh_data is not None else "-"
 
+        # One entry per PO column across all warehouses, so the frontend can
+        # render transit qty next to each warehouse's stock column.
+        t_lookup = transit_lookup.get(mapping["id"], {}) if mapping else {}
+        transit_cols = {}
+        for wh_cols in po_columns.values():
+            for col in wh_cols:
+                transit_cols[col["column_key"]] = t_lookup.get(col["column_key"])
+
         rows.append({
             "sku_id": stock_id,
             "product_master_id": pm["id"],
@@ -303,10 +351,12 @@ async def warehouse_stock_matrix():
             "sku_weight": pm.get("weight"),
             "warehouse_stock": warehouse_stock_qty,
             "city_stock": city_stock,
+            "transit_cols": transit_cols,
         })
 
     return {
         "warehouse_columns": warehouse_columns,
+        "po_columns": po_columns,
         "rows": rows,
     }
 

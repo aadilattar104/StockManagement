@@ -1,17 +1,57 @@
-import { useQuery } from '@tanstack/react-query'
-import { getWarehouseStockMatrix } from '../api/client'
+import { useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Trash2 } from 'lucide-react'
+import { getWarehouseStockMatrix, deleteTransitPo } from '../api/client'
+import ConfirmDialog from '../components/ConfirmDialog'
 
-function buildTableData(rows, warehouse_columns) {
-  const headers = ['SKU', 'Warehouse Stock', ...warehouse_columns]
+const WH_TRANSIT_COLORS = {
+  MUM: 'text-blue-400/50', PUN: 'text-purple-400/50',
+  DEL: 'text-amber-400/50', BLR: 'text-emerald-400/50',
+}
+
+// Matches the backend's WAREHOUSE_LABELS mapping in main.py — needed so we
+// can look up each city column's warehouse code and find its transit PO columns.
+const LABEL_TO_CODE = { Bangalore: 'BLR', Mumbai: 'MUM', Pune: 'PUN', Delhi: 'DEL' }
+
+function fmtShort(d) {
+  if (!d) return '—'
+  const [y, m, day] = d.split('-')
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  return `${parseInt(day)}-${months[parseInt(m) - 1]}-${y}`
+}
+
+// Builds one flat ordered column list: for each warehouse (in warehouse_columns
+// order), its city-stock column immediately followed by its own transit PO
+// column(s) — same layout the old Compare Warehouses tab used.
+function buildColumns(warehouse_columns, po_columns) {
+  const cols = []
+  for (const label of warehouse_columns) {
+    const code = LABEL_TO_CODE[label] || label
+    cols.push({ type: 'stock', label, code })
+    for (const col of (po_columns[code] || [])) {
+      cols.push({ type: 'transit', ...col })
+    }
+  }
+  return cols
+}
+
+function buildTableData(rows, columns) {
+  const headers = ['SKU', 'Warehouse Stock', ...columns.map(col =>
+    col.type === 'stock' ? col.label : `${col.warehouse} Transit (${fmtShort(col.po_date)})`
+  )]
   const body = rows.map(row => [
     row.sku_weight ? `${row.sku_title} (${row.sku_weight})` : row.sku_title,
     row.warehouse_stock,
-    ...warehouse_columns.map(city => row.city_stock?.[city] ?? '-'),
+    ...columns.map(col =>
+      col.type === 'stock'
+        ? (row.city_stock?.[col.label] ?? '-')
+        : (row.transit_cols?.[col.column_key]?.qty ?? '-')
+    ),
   ])
   return { headers, body }
 }
 
-async function exportToExcel(rows, warehouse_columns) {
+async function exportToExcel(rows, columns) {
   let XLSX
   try {
     XLSX = await import('xlsx')
@@ -20,9 +60,9 @@ async function exportToExcel(rows, warehouse_columns) {
     return
   }
 
-  const { headers, body } = buildTableData(rows, warehouse_columns)
+  const { headers, body } = buildTableData(rows, columns)
   const ws = XLSX.utils.aoa_to_sheet([headers, ...body])
-  ws['!cols'] = [{ wch: 36 }, { wch: 16 }, ...warehouse_columns.map(() => ({ wch: 14 }))]
+  ws['!cols'] = [{ wch: 36 }, { wch: 16 }, ...columns.map(() => ({ wch: 14 }))]
 
   const wb = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(wb, ws, 'Warehouse Stock Matrix')
@@ -30,9 +70,21 @@ async function exportToExcel(rows, warehouse_columns) {
 }
 
 export default function WarehouseStockMatrix() {
+  const qc = useQueryClient()
+  const [deletePoTarget, setDeletePoTarget] = useState(null)
+
   const { data, isLoading, error } = useQuery({
     queryKey: ['warehouse-stock-matrix'],
     queryFn: getWarehouseStockMatrix,
+  })
+
+  const deletePoMut = useMutation({
+    mutationFn: deleteTransitPo,
+    onSuccess: () => {
+      qc.invalidateQueries(['warehouse-stock-matrix'])
+      qc.invalidateQueries(['zypee-in-transit'])
+      setDeletePoTarget(null)
+    },
   })
 
   if (isLoading)
@@ -49,7 +101,11 @@ export default function WarehouseStockMatrix() {
       </div>
     )
 
-  const { warehouse_columns = [], rows = [] } = data || {}
+  const { warehouse_columns = [], rows = [], po_columns = {} } = data || {}
+
+  // Interleaved: each warehouse's stock column immediately followed by its
+  // own transit PO column(s), in warehouse_columns order.
+  const columns = buildColumns(warehouse_columns, po_columns)
 
   if (!rows.length)
     return (
@@ -68,7 +124,7 @@ export default function WarehouseStockMatrix() {
           </p>
         </div>
         <button
-          onClick={() => exportToExcel(rows, warehouse_columns)}
+          onClick={() => exportToExcel(rows, columns)}
           className="text-xs px-3 py-1.5 rounded border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition-colors"
           title="Export to Excel"
         >
@@ -86,9 +142,25 @@ export default function WarehouseStockMatrix() {
               <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap border-r border-slate-700 min-w-[110px]">
                 Warehouse Stock
               </th>
-              {warehouse_columns.map(city => (
-                <th key={city} className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap border-r border-slate-700/50 min-w-[100px]">
-                  {city}
+              {columns.map(col => col.type === 'stock' ? (
+                <th key={col.label} className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap border-r border-slate-700/50 min-w-[100px]">
+                  {col.label}
+                </th>
+              ) : (
+                <th key={col.column_key} className={`px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider whitespace-nowrap border-r border-slate-700/50 min-w-[100px] ${WH_TRANSIT_COLORS[col.warehouse]}`}>
+                  <div className="flex flex-col items-end gap-0.5">
+                    <span>{col.warehouse} Transit</span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-[10px] font-normal text-slate-500 normal-case tracking-normal">{fmtShort(col.po_date)}</span>
+                      <button
+                        onClick={() => setDeletePoTarget(col)}
+                        className="p-0.5 hover:bg-red-900/40 rounded text-slate-600 hover:text-red-400 transition-all"
+                        title={`Delete PO ${col.po_number}`}
+                      >
+                        <Trash2 className="w-2.5 h-2.5" />
+                      </button>
+                    </div>
+                  </div>
                 </th>
               ))}
             </tr>
@@ -108,16 +180,37 @@ export default function WarehouseStockMatrix() {
                     {row.warehouse_stock}
                   </span>
                 </td>
-                {warehouse_columns.map(city => (
-                  <td key={city} className="px-4 py-3 text-right font-mono text-slate-500 border-r border-slate-700/50">
-                    {row.city_stock?.[city] ?? '-'}
-                  </td>
-                ))}
+                {columns.map(col => {
+                  if (col.type === 'stock') return (
+                    <td key={col.label} className="px-4 py-3 text-right font-mono text-slate-500 border-r border-slate-700/50">
+                      {row.city_stock?.[col.label] ?? '-'}
+                    </td>
+                  )
+                  const t = row.transit_cols?.[col.column_key]
+                  return (
+                    <td key={col.column_key} className="px-4 py-3 text-right font-mono border-r border-slate-700/50">
+                      {t === null || t === undefined
+                        ? <span className="text-slate-700">—</span>
+                        : <span className={t.qty === 0 ? 'text-slate-600' : WH_TRANSIT_COLORS[col.warehouse]}>{t.qty}</span>
+                      }
+                    </td>
+                  )
+                })}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      <ConfirmDialog
+        open={!!deletePoTarget}
+        onClose={() => setDeletePoTarget(null)}
+        onConfirm={() => deletePoMut.mutate({ warehouse: deletePoTarget.warehouse, po_date: deletePoTarget.po_date, po_number: deletePoTarget.po_number })}
+        title="Delete PO Upload?"
+        message={`Warehouse: ${deletePoTarget?.warehouse} · PO Number: ${deletePoTarget?.po_number} · PO Date: ${fmtShort(deletePoTarget?.po_date)}`}
+        warning="This will permanently delete all transit rows for this PO. The entire column will disappear."
+        loading={deletePoMut.isPending}
+      />
     </div>
   )
 }
